@@ -137,6 +137,7 @@ impl Effects {
             }
             GameEvent::ScoreChanged { .. }
             | GameEvent::ModeLog { .. }
+            | GameEvent::ModeLogClear { .. }
             | GameEvent::ModeError { .. }
             | GameEvent::Unknown => {}
         }

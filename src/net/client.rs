@@ -443,6 +443,10 @@ impl GameClient {
                 state.push_mode_log(level.clone(), message.clone());
                 tracing::debug!(level = %level, %message, "mode script log");
             }
+            GameEvent::ModeLogClear { mode_id } => {
+                state.clear_mode_log();
+                tracing::debug!(%mode_id, "mode script cleared its console");
+            }
             GameEvent::ModeError { mode_id, message } => {
                 tracing::error!(%mode_id, %message, "mode script failed");
                 state.mode_error = Some(message.clone());
@@ -695,6 +699,49 @@ mod tests {
         );
         assert_eq!(state.mode_error.as_deref(), Some("boom"));
         assert!(!tick.notifications.is_empty());
+    }
+
+    #[test]
+    fn mode_log_clear_drops_the_console_but_keeps_the_error() {
+        let mut client = connected_client();
+        let mut state = crate::models::GameState::new();
+        let mut tick = NetworkTick::default();
+
+        for message in ["Collect 10 coins.", "Coin collected (1/10)"] {
+            client.apply_game_event(
+                &mut state,
+                GameEvent::ModeLog {
+                    mode_id: "coin_rush".to_owned(),
+                    level: "log".to_owned(),
+                    message: message.to_owned(),
+                },
+                &mut tick,
+            );
+        }
+        state.mode_error = Some("boom".to_owned());
+
+        client.apply_game_event(
+            &mut state,
+            GameEvent::ModeLogClear {
+                mode_id: "coin_rush".to_owned(),
+            },
+            &mut tick,
+        );
+
+        assert!(state.mode_log.is_empty());
+        assert_eq!(state.mode_error.as_deref(), Some("boom"));
+
+        // New lines start a fresh console.
+        client.apply_game_event(
+            &mut state,
+            GameEvent::ModeLog {
+                mode_id: "coin_rush".to_owned(),
+                level: "log".to_owned(),
+                message: "Coin collected (2/10)".to_owned(),
+            },
+            &mut tick,
+        );
+        assert_eq!(state.mode_log.len(), 1);
     }
 
     #[test]

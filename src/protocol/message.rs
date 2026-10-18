@@ -328,6 +328,11 @@ pub enum GameEvent {
         #[serde(default)]
         message: String,
     },
+    /// `lb.log_clear()`: drop the mode console lines shown so far.
+    ModeLogClear {
+        #[serde(default)]
+        mode_id: String,
+    },
     /// A mode script failed; the match fell back to Deathmatch rules.
     ModeError {
         #[serde(default)]

@@ -195,6 +195,14 @@ impl GameState {
         });
     }
 
+    /// Drops the script console (`lb.log_clear()` on the server).
+    ///
+    /// Only the log lines go: `mode_error` is a failure banner, not a console
+    /// line, and stays visible.
+    pub fn clear_mode_log(&mut self) {
+        self.mode_log.clear();
+    }
+
     /// Drops everything that is session-scoped when a connection is lost.
     /// Authoritative data must never survive into a new session.
     pub fn reset_session(&mut self) {
