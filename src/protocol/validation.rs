@@ -37,7 +37,16 @@ pub enum ValidationError {
     DuplicatePlayer(String),
     #[error("snapshot contains too many players ({0})")]
     TooManyPlayers(usize),
+    #[error("world size {0}x{1} is implausible")]
+    InvalidWorld(f32, f32),
+    #[error("movement speed {0} is implausible")]
+    InvalidMoveSpeed(f32),
 }
+
+/// Upper bound for a plausible world dimension (world units / pixels).
+const MAX_WORLD_DIMENSION: f32 = 1_000_000.0;
+/// Upper bound for a plausible player speed in world units per second.
+const MAX_MOVE_SPEED: f32 = 10_000.0;
 
 impl Validate for InputMessage {
     fn validate(&self) -> Result<(), ValidationError> {
@@ -64,6 +73,17 @@ impl Validate for Welcome {
         }
         if self.tick_rate == 0 || self.tick_rate > MAX_TICK_RATE {
             return Err(ValidationError::InvalidTickRate(self.tick_rate));
+        }
+        if let Some(world) = self.world {
+            let plausible = |v: f32| v.is_finite() && v > 0.0 && v <= MAX_WORLD_DIMENSION;
+            if !plausible(world.width) || !plausible(world.height) {
+                return Err(ValidationError::InvalidWorld(world.width, world.height));
+            }
+        }
+        if let Some(speed) = self.move_speed
+            && !(speed.is_finite() && speed > 0.0 && speed <= MAX_MOVE_SPEED)
+        {
+            return Err(ValidationError::InvalidMoveSpeed(speed));
         }
         Ok(())
     }
@@ -181,20 +201,63 @@ mod tests {
         assert!(snap.validate().is_err());
     }
 
-    #[test]
-    fn rejects_wrong_protocol_version() {
-        let welcome = Welcome {
-            protocol_version: PROTOCOL_VERSION + 1,
+    fn welcome() -> Welcome {
+        Welcome {
+            protocol_version: PROTOCOL_VERSION,
             player_id: "p".into(),
             session_id: None,
             match_id: None,
             tick_rate: 60,
             server_tick: 0,
             message: None,
+            world: None,
+            move_speed: None,
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_protocol_version() {
+        let welcome = Welcome {
+            protocol_version: PROTOCOL_VERSION + 1,
+            ..welcome()
         };
         assert!(matches!(
             welcome.validate(),
             Err(ValidationError::UnsupportedProtocolVersion { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_implausible_world_and_speed() {
+        let bad_world = Welcome {
+            world: Some(crate::protocol::message::WorldState {
+                width: f32::NAN,
+                height: 1800.0,
+            }),
+            ..welcome()
+        };
+        assert!(matches!(
+            bad_world.validate(),
+            Err(ValidationError::InvalidWorld(..))
+        ));
+
+        let bad_speed = Welcome {
+            move_speed: Some(-1.0),
+            ..welcome()
+        };
+        assert!(matches!(
+            bad_speed.validate(),
+            Err(ValidationError::InvalidMoveSpeed(_))
+        ));
+
+        let good = Welcome {
+            world: Some(crate::protocol::message::WorldState {
+                width: 3200.0,
+                height: 1800.0,
+            }),
+            move_speed: Some(220.0),
+            ..welcome()
+        };
+        good.validate().unwrap();
     }
 }

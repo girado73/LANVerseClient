@@ -101,6 +101,21 @@ impl InputPipeline {
     pub fn last_sequence(&self) -> u64 {
         self.sequence
     }
+
+    /// Moves the counter forward so the next sample is `sequence + 1`.
+    ///
+    /// Used after a reconnect: the server ignores any input whose sequence is
+    /// not greater than the highest one it already applied from this player.
+    /// The counter never moves backwards.
+    pub fn ensure_sequence_after(&mut self, sequence: u64) {
+        self.sequence = self.sequence.max(sequence);
+    }
+
+    /// Drops queued actions without emitting them (used when a press becomes
+    /// meaningless, e.g. while the connection is down).
+    pub fn clear_pending_actions(&mut self) {
+        self.pending_actions.clear();
+    }
 }
 
 #[cfg(test)]
@@ -134,6 +149,21 @@ mod tests {
         let second = pipeline.sample(Tick(2), Vec2::RIGHT);
         assert!(second.actions.is_empty());
         assert_eq!(second.sequence, 2);
+    }
+
+    #[test]
+    fn sequence_can_be_moved_forward_after_reconnect() {
+        let mut pipeline = InputPipeline::new(0.0);
+        pipeline.sample(Tick(1), Vec2::ZERO);
+        pipeline.ensure_sequence_after(500);
+        assert_eq!(
+            pipeline.sample(Tick(2), Vec2::ZERO).sequence,
+            501,
+            "sequences must stay strictly increasing for the server"
+        );
+        // Never moves backwards.
+        pipeline.ensure_sequence_after(3);
+        assert_eq!(pipeline.sample(Tick(3), Vec2::ZERO).sequence, 502);
     }
 
     #[test]

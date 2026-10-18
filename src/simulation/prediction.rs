@@ -34,6 +34,9 @@ use crate::protocol::message::Snapshot;
 ///
 /// These are *guesses* used for visual prediction. They must never be used to
 /// validate or override server data – if the server says otherwise, it wins.
+/// A wrong speed is visible as rubber-banding, so the default mirrors the
+/// Laravel default (`config/lanbash.php` → `gameplay.player.move = 220`) until
+/// the server announces `welcome.move_speed`.
 #[derive(Debug, Clone, Copy)]
 pub struct MovementModel {
     /// World units per second at full input.
@@ -45,7 +48,7 @@ pub struct MovementModel {
 impl Default for MovementModel {
     fn default() -> Self {
         Self {
-            speed: 96.0,
+            speed: 220.0,
             air_control: 1.0,
         }
     }
@@ -92,9 +95,6 @@ pub struct Predictor {
     local_player: Option<PlayerId>,
     /// Last authoritative position + tick.
     authority: Option<(Tick, Vec2)>,
-    /// Smoothed error, exponentially decaying – renderers can use it to blend
-    /// out corrections instead of snapping.
-    smoothed_correction: Vec2,
 }
 
 impl Predictor {
@@ -103,7 +103,6 @@ impl Predictor {
             model,
             local_player: None,
             authority: None,
-            smoothed_correction: Vec2::ZERO,
         }
     }
     pub fn model(&self) -> &MovementModel {
@@ -113,7 +112,6 @@ impl Predictor {
     pub fn set_local_player(&mut self, id: Option<PlayerId>) {
         if self.local_player != id {
             self.authority = None;
-            self.smoothed_correction = Vec2::ZERO;
         }
         self.local_player = id;
     }
@@ -155,42 +153,51 @@ impl Predictor {
         inputs: &InputBuffer,
         tick_rate: u32,
     ) -> Prediction {
-        let Some((authority_tick, mut position)) = self.authority else {
+        let Some((_, mut position)) = self.authority else {
             return Prediction::empty(current_tick);
         };
+        let authority_position = position;
 
+        // `pending()` already contains exactly the inputs the server has *not*
+        // acknowledged (`on_snapshot` prunes by sequence), so replaying all of
+        // them is the correct reconciliation. Comparing `client_tick` with the
+        // server tick was wrong: the two clocks start at different values
+        // (a late joiner would never replay anything).
         let mut replayed = 0;
         for input in inputs.pending() {
-            // Replay only inputs that are newer than the acked server state.
-            if input.client_tick <= authority_tick.0 {
-                continue;
-            }
             position += self.model.displacement(input.movement, tick_rate);
             replayed += 1;
         }
 
-        // `authority` holds the server position; derive the correction from it.
-        let correction = position - self.authority.map(|a| a.1).unwrap_or(position);
-        // Smoothing for display: the renderer adds this to the interpolated pose.
-        self.smoothed_correction = self.smoothed_correction.lerp(correction, 0.25);
-
         Prediction {
             tick: current_tick,
             position,
-            correction,
+            // Distance between prediction and server base – diagnostics only.
+            // The renderer must use `position` as-is: adding the correction on
+            // top double-counted the replayed movement and made the sprite
+            // jitter by one input per ack.
+            correction: position - authority_position,
             replayed_inputs: replayed,
             has_authority: true,
         }
     }
 
-    /// Smoothed correction, suitable for additive rendering of the local player.
-    pub fn smoothed_correction(&self) -> Vec2 {
-        self.smoothed_correction
-    }
-
     pub fn reset(&mut self) {
         self.authority = None;
-        self.smoothed_correction = Vec2::ZERO;
+    }
+
+    /// Replaces the estimated movement speed with the server-announced value.
+    ///
+    /// This is *still* only used for visual prediction; the server position
+    /// overwrites everything on the next snapshot. `None`/invalid values keep
+    /// the current estimate.
+    pub fn set_speed(&mut self, speed: Option<f32>) {
+        if let Some(speed) = speed
+            && speed.is_finite()
+            && speed > 0.0
+        {
+            self.model.speed = speed;
+        }
     }
 }
 /// Utility: build a snapshot with our player for tests.

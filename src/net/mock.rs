@@ -58,15 +58,34 @@ pub struct MockTransport {
 impl MockTransport {
     /// Connects to a fresh in-memory server.
     ///
-    /// Deliberately `async` (although it does no I/O): the mock server task is
-    /// spawned on the caller's runtime, which must already exist. Calling it
-    /// from synchronous code outside a runtime silently produced a dead
-    /// transport in an earlier revision.
+    /// The fake server needs a runtime while the transport is created; it is
+    /// spawned there and then keeps running on its **own thread**. It is never
+    /// tied to a test or to a game thread, so tests that concurrently create
+    /// (and drop) other runtimes cannot shut it down underneath the session.
+    /// This used to be the cause of the "connected but zero players" flake.
     pub async fn connect(config: MockServerConfig) -> Self {
         let (outbound, outbound_rx) = mpsc::unbounded_channel();
         let (inbound_tx, inbound) = mpsc::unbounded_channel();
 
-        tokio::spawn(mock_server(config, outbound_rx, inbound_tx));
+        let server_thread = std::thread::Builder::new()
+            .name("lan-bash-mock-server".to_owned())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(err) => {
+                        tracing::error!(%err, "failed to build mock server runtime");
+                        return;
+                    }
+                };
+                runtime.block_on(mock_server(config, outbound_rx, inbound_tx));
+            });
+        if let Err(err) = server_thread {
+            tracing::error!(%err, "failed to start mock server thread");
+        }
+
         Self {
             outbound,
             inbound,
@@ -145,6 +164,12 @@ async fn mock_server(
     let ticks_per_snapshot =
         ((config.tick_rate as u64 * config.snapshot_interval_ms.max(10)) / 1000).max(1);
     let mut welcome_sent = false;
+    // `interval` (unlike a fresh `sleep` per iteration) keeps its deadline
+    // across loop iterations. A client that sends an input every tick used to
+    // win the `select!` every time and reset the sleep, so the fake server
+    // never produced a snapshot ("connected but zero players").
+    let mut snapshot_timer = tokio::time::interval(snapshot_period);
+    snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -161,6 +186,12 @@ async fn mock_server(
                             tick_rate: config.tick_rate,
                             server_tick: tick,
                             message: Some(format!("Welcome, {}", config.player_name)),
+                            // Same world and speed as a default Laravel server.
+                            world: Some(crate::protocol::message::WorldState {
+                                width: 3200.0,
+                                height: 1800.0,
+                            }),
+                            move_speed: Some(220.0),
                         });
                         let _ = send(&inbound, &welcome);
                         let _ = send(&inbound, &ProtocolMessage::RoundState(RoundState {
@@ -193,7 +224,7 @@ async fn mock_server(
                     }
                 }
             }
-            _ = tokio::time::sleep(snapshot_period) => {
+            _ = snapshot_timer.tick() => {
                 if !welcome_sent {
                     continue;
                 }
@@ -245,6 +276,7 @@ async fn mock_server(
                     players,
                     round: None,
                     server_time_ms: None,
+                    world: None,
                 });
                 if send(&inbound, &snapshot).is_err() {
                     break;

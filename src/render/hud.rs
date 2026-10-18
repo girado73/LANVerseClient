@@ -10,6 +10,7 @@ use crate::config::RenderConfig;
 use crate::core::PlayerId;
 use crate::models::GameState;
 use crate::net::client::{describe_status, phase_label};
+use crate::net::connection::ConnectionStatus;
 
 const PADDING: i32 = 4;
 const FONT_SIZE: i32 = 8;
@@ -21,6 +22,7 @@ impl HudRenderer {
         d: &mut impl RaylibDraw,
         state: &GameState,
         config: &RenderConfig,
+        server: &str,
         pending_inputs: usize,
         fps: u32,
     ) {
@@ -32,13 +34,24 @@ impl HudRenderer {
             _ => Color::new(230, 200, 90, 255),
         };
         d.draw_text(&status_text, PADDING, PADDING, FONT_SIZE, status_color);
+        // The phase line is only meaningful once the server has told us one.
+        let phase_text = if state.connection == ConnectionStatus::Connected {
+            phase_label(state.phase)
+        } else {
+            "Waiting for the game server"
+        };
         d.draw_text(
-            phase_label(state.phase),
+            phase_text,
             PADDING,
             PADDING + FONT_SIZE + 2,
             FONT_SIZE,
             Color::new(220, 220, 230, 255),
         );
+
+        // --- center banner while not in a match --------------------------
+        if !state.connection.can_send_gameplay() {
+            Self::draw_connection_banner(d, config, server, state);
+        }
 
         // --- top-right: scoreboard ---------------------------------------
         let mut y = PADDING;
@@ -95,7 +108,7 @@ impl HudRenderer {
         // --- bottom-right: round timer -----------------------------------
         if state.round.time_left_ms > 0 {
             let secs = state.round.time_left_ms.div_ceil(1000);
-            let text = format!("{:.0}:{:.0}", secs / 60, secs % 60);
+            let text = format!("{}:{:02}", secs / 60, secs % 60);
             let width = measure_text(&text, FONT_SIZE * 2);
             d.draw_text(
                 &text,
@@ -123,6 +136,50 @@ impl HudRenderer {
         }
     }
 
+    /// Shown until the handshake completed: the server endpoint and the last
+    /// error, so a client started before the server explains itself instead of
+    /// rendering an empty world.
+    fn draw_connection_banner(
+        d: &mut impl RaylibDraw,
+        config: &RenderConfig,
+        server: &str,
+        state: &GameState,
+    ) {
+        let status = describe_status(state.connection);
+        let lines = [
+            ("LAN Bash", Color::new(250, 240, 140, 255)),
+            (status.as_str(), Color::WHITE),
+            (server, Color::new(170, 220, 255, 255)),
+            (
+                "Start the server with: php artisan game:serve --port=8080",
+                Color::new(190, 190, 200, 255),
+            ),
+        ];
+        let line_height = FONT_SIZE + 3;
+        let y0 = config.internal_height / 2 - (lines.len() as i32 * line_height) / 2;
+        for (index, (text, color)) in lines.iter().enumerate() {
+            let width = measure_text(text, FONT_SIZE);
+            d.draw_text(
+                text,
+                (config.internal_width - width) / 2,
+                y0 + index as i32 * line_height,
+                FONT_SIZE,
+                *color,
+            );
+        }
+        if let Some(error) = &state.last_error {
+            let text = truncate(error, 72);
+            let width = measure_text(&text, FONT_SIZE);
+            d.draw_text(
+                &text,
+                (config.internal_width - width) / 2,
+                y0 + lines.len() as i32 * line_height + 4,
+                FONT_SIZE,
+                Color::new(235, 120, 120, 255),
+            );
+        }
+    }
+
     fn draw_debug(
         d: &mut impl RaylibDraw,
         state: &GameState,
@@ -134,7 +191,11 @@ impl HudRenderer {
             format!("fps {fps}"),
             format!("tick {} @ {} Hz", state.server_tick.0, state.tick_rate),
             format!("rtt {:.1} ms", state.latency_ms),
-            format!("pending inputs {pending_inputs}"),
+            format!(
+                "pending inputs {pending_inputs} (ack {:?}, overflow {})",
+                state.acked_input_sequence, state.buffer_overflows
+            ),
+            format!("world {:.0}x{:.0}", state.world.width, state.world.height),
             format!("players {}", state.players.len()),
             format!(
                 "local {:?}",

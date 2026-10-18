@@ -21,9 +21,36 @@ use crate::interpolation::Interpolator;
 use crate::models::world::{PlayerState, RoundInfo};
 use crate::net::connection::{ConnectionStatus, NetClientHandle};
 use crate::net::events::NetEvent;
+use crate::net::mock::MockTransport;
 use crate::net::session;
+use crate::net::transport::{MessageTransport, WsTransport};
 use crate::protocol::message::{GameEvent, Hello, Phase, RoundState, Snapshot, Welcome};
 use crate::protocol::validation::Validate;
+
+/// Builds the connection future for the session driver (WebSocket transport).
+fn websocket_connect(url: String) -> session::ConnectFn {
+    Box::new(move || {
+        let url = url.clone();
+        Box::pin(async move {
+            let transport: Box<dyn MessageTransport> =
+                Box::new(WsTransport::connect_url(url).await?);
+            Ok(transport)
+        }) as session::BoxFuture
+    })
+}
+
+/// Starts the session driver with a connection factory.
+///
+/// The factory has to be *polled* inside a runtime (its I/O driver lives
+/// there). `GameClient` therefore either borrows the caller's runtime or passes
+/// one it owns – that private runtime is shut down once the driver stops.
+fn spawn_driver(
+    connection: crate::config::ConnectionConfig,
+    hello: Hello,
+    connect: session::ConnectFn,
+) -> anyhow::Result<NetClientHandle> {
+    session::spawn_with_transports(connection, hello, connect)
+}
 
 /// Everything the game observes about networking in one frame.
 #[derive(Debug, Default)]
@@ -38,6 +65,23 @@ pub struct GameClient {
     config: NetConfig,
     interpolator: Interpolator,
     pub effects: Effects,
+    /// Hello currently in flight, so a manual reconnect can replay it.
+    hello: Option<Hello>,
+    /// Set once a `welcome` arrived; gates input during a half-open socket.
+    handshake_complete: bool,
+    /// Newest snapshot applied since the last [`GameClient::take_applied_snapshot`].
+    ///
+    /// The networking layer cannot touch the replay buffer or the predictor
+    /// (they live on the game thread), so it hands the applied snapshot over
+    /// instead. Only the newest matters for reconciliation: authority is always
+    /// the latest server state.
+    latest_snapshot: Option<Snapshot>,
+    /// Runtime under which connection futures are *polled*.
+    ///
+    /// `None` uses the caller's ambient runtime (tests, embedding). Without one
+    /// the driver refuses to connect with a clear error instead of hanging, so
+    /// the game loop passes a runtime it owns.
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl GameClient {
@@ -51,14 +95,30 @@ impl GameClient {
             config,
             interpolator,
             effects: Effects::default(),
+            hello: None,
+            handshake_complete: false,
+            latest_snapshot: None,
+            runtime: None,
         }
+    }
+
+    /// Drives connections with `runtime` instead of the caller's runtime.
+    pub fn with_runtime(mut self, runtime: tokio::runtime::Runtime) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// Keeps the driver's runtime alive (see [`GameClient::with_runtime`]).
+    pub fn releases_runtime(&mut self) -> Option<tokio::runtime::Runtime> {
+        self.runtime.take()
     }
 
     /// Starts the network driver in the background.
     pub fn connect(&mut self, hello: Hello) -> anyhow::Result<()> {
         let connection = self.config.connection.clone();
         self.start(hello, move |hello| {
-            session::spawn(connection.clone(), hello)
+            let connect = websocket_connect(connection.url.clone());
+            spawn_driver(connection, hello, connect)
         })
     }
 
@@ -70,10 +130,15 @@ impl GameClient {
     ) -> anyhow::Result<()> {
         let connection = self.config.connection.clone();
         self.start(hello, move |hello| {
-            session::spawn_with(connection.clone(), hello, move || {
+            let connect: session::ConnectFn = Box::new(move || {
                 let server = server.clone();
-                async move { Ok(crate::net::mock::MockTransport::connect(server).await) }
-            })
+                Box::pin(async move {
+                    let transport: Box<dyn MessageTransport> =
+                        Box::new(MockTransport::connect(server).await);
+                    Ok(transport)
+                }) as session::BoxFuture
+            });
+            spawn_driver(connection.clone(), hello, connect)
         })
     }
 
@@ -85,9 +150,11 @@ impl GameClient {
         if let Some(handle) = &self.handle {
             let _ = handle.shutdown();
         }
+        self.hello = Some(hello.clone());
         let handle = spawn(hello)?;
         self.handle = Some(handle);
         self.interpolator.clear();
+        self.handshake_complete = false;
         self.status = ConnectionStatus::Connecting;
         Ok(())
     }
@@ -97,15 +164,45 @@ impl GameClient {
             let _ = handle.shutdown();
         }
         self.status = ConnectionStatus::Disconnected;
+        self.handshake_complete = false;
         self.interpolator.clear();
+    }
+
+    /// Stops the current driver and starts a fresh one with the previous hello.
+    ///
+    /// Needed when automatic retries are exhausted (`Retrying`) or the user
+    /// wants to retry after a fatal server error.
+    pub fn reconnect(&mut self) -> anyhow::Result<()> {
+        let hello = self
+            .hello
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("client was never connected"))?;
+        let connection = self.config.connection.clone();
+        self.start(hello, move |hello| {
+            let connect = websocket_connect(connection.url.clone());
+            spawn_driver(connection, hello, connect)
+        })
     }
 
     pub fn status(&self) -> ConnectionStatus {
         self.status
     }
 
+    /// The status as of the last [`GameClient::update`]. The session driver and
+    /// the game thread race by one frame, so the HUD should use this value
+    /// instead of [`GameClient::status`].
     pub fn is_connected(&self) -> bool {
-        self.status.can_send_gameplay()
+        self.status.can_send_gameplay() && self.handshake_complete
+    }
+
+    /// Returns the newest snapshot applied since the last call.
+    ///
+    /// The game loop feeds it to `Predictor::on_snapshot`, which is what prunes
+    /// acknowledged inputs from the replay buffer and updates the
+    /// authoritative base position. Without this hand-over the buffer only
+    /// ever grows and prediction has no authority.
+    pub fn take_applied_snapshot(&mut self) -> Option<Snapshot> {
+        self.latest_snapshot.take()
     }
 
     /// Sends an input message produced by [`InputPipeline::sample`].
@@ -130,12 +227,21 @@ impl GameClient {
     /// Called exactly once per frame by the app. Any event that would replace
     /// authoritative state is validated first; invalid frames are dropped.
     pub fn update(&mut self, state: &mut crate::models::GameState) -> NetworkTick {
-        let mut tick = NetworkTick::default();
-
         let events = match &self.handle {
             Some(handle) => handle.drain_events(),
             None => Vec::new(),
         };
+        self.apply_events(state, events)
+    }
+
+    /// Applies already-drained events – the seam tests use to drive
+    /// `GameClient` without a socket.
+    fn apply_events(
+        &mut self,
+        state: &mut crate::models::GameState,
+        events: Vec<NetEvent>,
+    ) -> NetworkTick {
+        let mut tick = NetworkTick::default();
 
         for event in events {
             match event {
@@ -143,13 +249,26 @@ impl GameClient {
                     if status != self.status {
                         tracing::info!(from = ?self.status, to = ?status, "connection status");
                     }
+                    let was_connected = self.handshake_complete;
                     self.status = status;
                     state.connection = status;
+                    self.handshake_complete = status.can_send_gameplay();
 
                     if !status.can_send_gameplay() {
                         // Authoritative state from an old session must not leak
-                        // into the next one.
+                        // into the next one – neither into the interpolator nor
+                        // into `GameState`. Predictions and local effects are
+                        // render-only and go with it.
                         self.interpolator.clear();
+                        self.latest_snapshot = None;
+                        state.reset_session();
+                        state.connection = status;
+                        if was_connected {
+                            tick.notifications.push("Connection lost".to_owned());
+                            self.effects.enqueue(crate::effects::FxEvent::Toast(
+                                "Connection lost".to_owned(),
+                            ));
+                        }
                     }
                 }
                 NetEvent::Welcome(welcome) => self.apply_welcome(state, welcome),
@@ -168,7 +287,10 @@ impl GameClient {
                         .push(format!("Server: {}", error.message));
                 }
                 NetEvent::TransportError(error) => {
-                    tracing::warn!(%error, "transport error");
+                    // Transport errors are frequent while the server is down
+                    // (once per reconnect attempt); the session driver already
+                    // logs them, here they only end up in the HUD.
+                    tracing::debug!(%error, "transport error");
                     state.last_error = Some(error);
                 }
             }
@@ -190,6 +312,8 @@ impl GameClient {
         state.tick_rate = welcome.tick_rate;
         state.server_tick = Tick(welcome.server_tick);
         state.last_error = None;
+        state.world = crate::models::WorldBounds::from_welcome(&welcome);
+        state.move_speed = welcome.move_speed;
         self.interpolator.clear();
 
         tracing::info!(
@@ -211,6 +335,13 @@ impl GameClient {
                 current = state.server_tick.0,
                 "dropping out-of-order snapshot"
             );
+            // Still take the ack: it is per-player and monotonic, so it is
+            // never stale just because the world state is. (The predictor
+            // prunes the replay buffer with it in `on_snapshot`.)
+            if let Some(acked) = snapshot.acked_input_sequence {
+                self.effects.record_ack(acked);
+                state.acked_input_sequence = Some(acked);
+            }
             return;
         }
 
@@ -220,6 +351,9 @@ impl GameClient {
         for player in &snapshot.players {
             state.players.insert(player.id.clone(), player.clone());
         }
+        if let Some(world) = snapshot.world {
+            state.world = crate::models::WorldBounds::from_dimensions(world.width, world.height);
+        }
         if let Some(round) = &snapshot.round {
             state.round.id = round.round_id.clone();
             state.round.time_left_ms = round.time_left_ms;
@@ -228,7 +362,9 @@ impl GameClient {
         // ---- interpolation buffer (render-only) ----
         if let Some(acked) = snapshot.acked_input_sequence {
             self.effects.record_ack(acked);
+            state.acked_input_sequence = Some(acked);
         }
+        self.latest_snapshot = Some(snapshot.clone());
         self.interpolator.push(snapshot);
 
         // If a player vanished from the snapshot, their local visuals go too.
@@ -284,15 +420,25 @@ impl GameClient {
     }
 
     fn apply_round_state(&mut self, state: &mut crate::models::GameState, round: RoundState) {
-        if round.phase != state.phase {
-            tracing::info!(from = ?state.phase, to = ?round.phase, "phase change");
+        let previous = state.phase;
+        if round.phase != previous {
+            tracing::info!(from = ?previous, to = ?round.phase, "phase change");
+            self.effects.on_phase_changed(previous, round.phase);
         }
         state.phase = round.phase;
-        state.round.id = round.round.or(state.round.id.take());
+        state.round.id = round.round.clone().or(state.round.id.take());
         state.round.number = round.round_number.or(state.round.number);
         state.round.winner = round.winner.clone();
-        if let Some(countdown) = round.countdown_ms {
-            state.round.time_left_ms = countdown;
+
+        // `countdown_ms` is only authoritative during the countdown. Outside of
+        // it the server sends 0, which must not wipe the round timer that the
+        // snapshots keep up to date.
+        if round.phase == Phase::Countdown {
+            if let Some(countdown) = round.countdown_ms {
+                state.round.time_left_ms = countdown;
+            }
+        } else if matches!(round.phase, Phase::Lobby | Phase::Connecting) {
+            state.round.time_left_ms = 0;
         }
     }
 
@@ -315,7 +461,8 @@ pub fn describe_status(status: ConnectionStatus) -> String {
         ConnectionStatus::Connecting => "Connecting…".to_owned(),
         ConnectionStatus::Handshaking => "Handshaking…".to_owned(),
         ConnectionStatus::Connected => "Online".to_owned(),
-        ConnectionStatus::Reconnecting { attempt } => format!("Reconnecting (attempt {attempt})…"),
+        ConnectionStatus::Reconnecting { .. } => "Reconnecting…".to_owned(),
+        ConnectionStatus::Retrying => "Server unreachable – retrying".to_owned(),
         ConnectionStatus::Failed => "Connection failed".to_owned(),
     }
 }
@@ -371,6 +518,8 @@ mod tests {
             tick_rate,
             server_tick: 10,
             message: None,
+            world: None,
+            move_speed: None,
         }
     }
 
@@ -464,5 +613,97 @@ mod tests {
         assert_eq!(state.phase, Phase::Running);
         assert_eq!(state.round.number, Some(2));
         assert!(state.accepts_gameplay_input());
+    }
+
+    #[test]
+    fn running_round_state_keeps_the_snapshot_timer() {
+        // Laravel sends `countdown_ms: 0` for every non-countdown phase; that
+        // used to reset the round clock to 0:00 right after the start.
+        let mut client = connected_client();
+        let mut state = crate::models::GameState::new();
+        state.round.time_left_ms = 179_000;
+        client.apply_round_state(
+            &mut state,
+            RoundState {
+                phase: Phase::Running,
+                round: Some("lan-1".into()),
+                round_number: Some(1),
+                countdown_ms: None,
+                winner: None,
+            },
+        );
+        assert_eq!(state.round.time_left_ms, 179_000);
+        assert_eq!(state.round.id, Some("lan-1".into()));
+
+        client.apply_round_state(
+            &mut state,
+            RoundState {
+                phase: Phase::Countdown,
+                round: Some("lan-1".into()),
+                round_number: Some(1),
+                countdown_ms: Some(3000),
+                winner: None,
+            },
+        );
+        assert_eq!(state.round.time_left_ms, 3000);
+    }
+
+    #[test]
+    fn losing_the_connection_resets_authoritative_state() {
+        let mut client = connected_client();
+        client.handshake_complete = true;
+        let mut state = crate::models::GameState::new();
+        state.local_player = Some("me".into());
+        state.players.insert("a".into(), default_player("a"));
+        self::state_connected(&mut client, &mut state);
+        assert_eq!(state.connection, ConnectionStatus::Connected);
+
+        let _ = client.apply_events(
+            &mut state,
+            vec![NetEvent::Status(ConnectionStatus::Reconnecting {
+                attempt: 1,
+            })],
+        );
+
+        assert!(state.players.is_empty(), "stale players must not survive");
+        assert!(state.local_player.is_none());
+        assert!(!client.is_connected());
+    }
+
+    #[test]
+    fn connection_lost_is_announced_once() {
+        let mut client = connected_client();
+        client.status = ConnectionStatus::Connected;
+        client.handshake_complete = true;
+        let mut state = crate::models::GameState::new();
+        state.connection = ConnectionStatus::Connected;
+        let tick = client.apply_events(
+            &mut state,
+            vec![NetEvent::Status(ConnectionStatus::Reconnecting {
+                attempt: 1,
+            })],
+        );
+        assert!(
+            tick.notifications
+                .iter()
+                .any(|n| n.contains("Connection lost")),
+            "player should be told the connection dropped: {:?}",
+            tick.notifications
+        );
+        // Toasts are drained separately from the HUD notification list.
+        client.effects.drain();
+        let tick = client.apply_events(
+            &mut state,
+            vec![NetEvent::Status(ConnectionStatus::Reconnecting {
+                attempt: 2,
+            })],
+        );
+        assert!(tick.notifications.is_empty(), "only announced once");
+    }
+
+    fn state_connected(client: &mut GameClient, state: &mut crate::models::GameState) {
+        client.status = ConnectionStatus::Connected;
+        client.handshake_complete = true;
+        state.connection = ConnectionStatus::Connected;
     }
 }

@@ -46,10 +46,9 @@ pub fn classify(message: ProtocolMessage, latency: &mut LatencyEstimator) -> Vec
             .map(|rtt| vec![NetEvent::Latency(rtt)])
             .unwrap_or_default(),
         ProtocolMessage::Error(error) => vec![NetEvent::ServerError(error)],
-        ProtocolMessage::Unknown(value) => {
-            tracing::debug!(?value, "ignoring unknown server message");
-            Vec::new()
-        }
+        // Reverb's own `pusher:*` envelopes and anything newer than this client
+        // arrive here – debug level only, they are not interesting per message.
+        ProtocolMessage::Unknown(_) => Vec::new(),
         // A client->server message arriving from the server is nonsense.
         other => {
             tracing::warn!(
@@ -84,7 +83,20 @@ mod tests {
     fn unknown_messages_are_ignored() {
         let mut latency = LatencyEstimator::default();
         let events = classify(
-            ProtocolMessage::from_json_str(r#"{"type":"whatever"}"#).unwrap(),
+            crate::protocol::parse_frame(r#"{"type":"whatever"}"#).unwrap(),
+            &mut latency,
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn pusher_envelopes_are_silently_ignored() {
+        let mut latency = LatencyEstimator::default();
+        let events = classify(
+            crate::protocol::parse_frame(
+                r#"{"event":"pusher:connection_established","data":"{\"socket_id\":\"1.2\"}"}"#,
+            )
+            .unwrap(),
             &mut latency,
         );
         assert!(events.is_empty());

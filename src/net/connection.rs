@@ -33,7 +33,11 @@ pub enum ConnectionStatus {
     Connected,
     /// Backoff delay before the next attempt (`attempt` of `max`).
     Reconnecting { attempt: u32 },
-    /// Terminal – either the server rejected us fatally or retries are exhausted.
+    /// Automatic retries are exhausted; the session stays alive so a manual
+    /// reconnect can still succeed. Not an error.
+    Retrying,
+    /// Terminal – the server rejected us fatally (bad token, protocol
+    /// mismatch, server error).
     Failed,
 }
 
@@ -45,8 +49,17 @@ impl ConnectionStatus {
             Self::Handshaking => "handshaking",
             Self::Connected => "connected",
             Self::Reconnecting { .. } => "reconnecting",
+            Self::Retrying => "retrying",
             Self::Failed => "failed",
         }
+    }
+
+    /// Whether the driver will keep trying on its own.
+    pub fn is_retrying(&self) -> bool {
+        matches!(
+            self,
+            Self::Connecting | Self::Handshaking | Self::Reconnecting { .. }
+        )
     }
 
     /// Whether gameplay input may currently be sent.
@@ -199,19 +212,17 @@ impl Lifecycle {
         attempt: u32,
         reconnect_delay: Option<Duration>,
     ) -> ConnectionStatus {
+        *self = Self::WaitingToConnect {
+            attempt: attempt + 1,
+        };
         match reconnect_delay {
-            Some(_) => {
-                *self = Self::WaitingToConnect {
-                    attempt: attempt + 1,
-                };
-                ConnectionStatus::Reconnecting {
-                    attempt: attempt + 1,
-                }
-            }
-            None => {
-                *self = Self::Terminated;
-                ConnectionStatus::Failed
-            }
+            Some(_) => ConnectionStatus::Reconnecting {
+                attempt: attempt + 1,
+            },
+            // Retries are exhausted but the driver is still alive and will try
+            // again if the game explicitly reconnects – `Retrying`, not `Failed`
+            // (which is reserved for fatal server rejections).
+            None => ConnectionStatus::Retrying,
         }
     }
 
@@ -248,8 +259,11 @@ mod tests {
             lifecycle.on_disconnect(0, Some(Duration::from_millis(500))),
             ConnectionStatus::Reconnecting { attempt: 1 }
         );
-        assert_eq!(lifecycle.on_disconnect(3, None), ConnectionStatus::Failed);
-        assert!(lifecycle.is_terminated());
+        // Exhausted retries are not terminal: the driver can still be asked to
+        // reconnect explicitly.
+        assert_eq!(lifecycle.on_disconnect(3, None), ConnectionStatus::Retrying);
+        assert!(!lifecycle.is_terminated());
+        assert_eq!(lifecycle.attempt(), 4);
     }
 
     #[test]

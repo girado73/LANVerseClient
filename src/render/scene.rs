@@ -47,9 +47,10 @@ impl SceneRenderer {
             draw_one(d, state, camera, interpolator, render_tick, player);
         }
 
-        // --- border of the playfield (until the server owns maps) --------
+        // --- border of the playfield (server-provided size) --------------
+        let world = state.world;
         let field_min = camera.world_to_screen(Vec2::new(0.0, 0.0));
-        let field_max = camera.world_to_screen(Vec2::new(480.0, 270.0));
+        let field_max = camera.world_to_screen(Vec2::new(world.width, world.height));
         d.draw_rectangle_lines(
             field_min.x.round() as i32,
             field_min.y.round() as i32,
@@ -118,7 +119,8 @@ fn draw_one(
         sprites::draw_damage_popups(d, screen, visuals);
     }
 
-    // Name tag (skip while the HUD shows our own name).
+    // Name tag (skip while the HUD shows our own name). Dead players keep
+    // theirs so the kill is readable while they wait for the respawn.
     if !is_local && !player.name.is_empty() {
         let width = player.name.chars().count() as f32 * 8.0 * 0.6;
         d.draw_text(
@@ -127,6 +129,15 @@ fn draw_one(
             (screen.y - sprites::PLAYER_HEIGHT - 16.0).round() as i32,
             8,
             Color::new(230, 230, 240, 220),
+        );
+    }
+    if !player.is_alive {
+        d.draw_text(
+            "KO",
+            (screen.x - 5.0).round() as i32,
+            (screen.y - sprites::PLAYER_HEIGHT - 9.0).round() as i32,
+            8,
+            Color::new(250, 90, 90, 230),
         );
     }
 }

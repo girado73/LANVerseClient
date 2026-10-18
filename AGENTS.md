@@ -87,3 +87,27 @@ Beispiel:
   "actions": []
 }
 
+### Async-Runtime
+
+Die Verbindung wird von `net::session` in einem eigenen Thread mit eigener
+Tokio-Runtime aufgebaut. Der Future für den eigentlichen Transport muss
+allerdings *in* einer Runtime erzeugt und gepollt werden.
+
+- Der Game-Thread (`ClientApp`) besitzt dafür seine eigene Runtime, wenn der
+  Aufrufer keine mitbringt. Tests müssen `build_tokio_runtime()` benutzen und
+  `enter()`en.
+- Eine Runtime ohne Reactor führt nicht zu einem Fehler, sondern dazu, dass der
+  Future nie gepollt wird ("verbunden", aber null Snapshots).
+- Eine Multi-Thread-Runtime darf nicht innerhalb von `block_on` gedroppt
+  werden (`cannot drop a runtime where blocking is not allowed`).
+  Current-Thread-Runtimes haben dieses Problem nicht.
+- `run_headless` blockiert den Game-Thread: dort muss die Runtime auf einem
+  Worker-Thread weiterlaufen (deshalb `build_tokio_runtime()`, nicht
+  `new_current_thread()`).
+
+### Protokoll
+
+`docs/protocol.md` ist die verbindliche Schnittstelle. Frames werden tolerant
+geparst (`protocol::codec`): unbekannte `type`s und Reverb-`pusher:*`-Frames
+werden ignoriert, nie als Verbindungsfehler behandelt. `round_state.countdown_ms`
+ist nur während `countdown` gültig – der Server sendet außerhalb `0`.

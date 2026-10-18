@@ -29,9 +29,11 @@
 //! All snapshots/events are *mirrored into the client state* by
 //! `net::client::GameClient`; gameplay modules never deserialize JSON.
 
+pub mod codec;
 pub mod message;
 pub mod validation;
 
+pub use codec::{DecodeFailure, parse_frame};
 pub use message::*;
 pub use validation::Validate;
 

@@ -56,14 +56,31 @@ pub trait MessageTransport: Send {
     async fn close(&mut self) -> Result<(), TransportError>;
 }
 
+/// Forwards to the boxed transport, so `Box<dyn MessageTransport>` is itself a
+/// [`MessageTransport`] (used by the session driver's type-erased factory).
+#[async_trait]
+impl MessageTransport for Box<dyn MessageTransport> {
+    async fn next_message(&mut self) -> Result<Option<String>, TransportError> {
+        (**self).next_message().await
+    }
+
+    async fn send(&mut self, payload: String) -> Result<(), TransportError> {
+        (**self).send(payload).await
+    }
+
+    async fn close(&mut self) -> Result<(), TransportError> {
+        (**self).close().await
+    }
+}
+
 /// WebSocket transport built on `tokio-tungstenite`.
 ///
-/// Connection flow is Laravel Echo-compatible:
-/// * The URL is the plain app endpoint, e.g. `ws://host:8080/app/lan-bash-client`.
-/// * `token` – when present – is forwarded as a `?auth=<token>` query
-///   parameter because browser WebSockets cannot set headers; the Laravel side
-///   validates it in `Broadcast::routes()` / its channel auth handler.
-/// * We additionally send a Laravel-conventional `User-Agent`, harmless for Reverb.
+/// Connection flow is Laravel Reverb-compatible:
+/// * The URL is the app endpoint **including the app key**, e.g.
+///   `ws://host:8080/app/<REVERB_APP_KEY>` (`game:serve` routes game frames
+///   behind `/app/{key}`). A URL without the key is rejected with HTTP 403.
+/// * `wss://` works out of the box (rustls + webpki roots), so the same client
+///   can talk to a TLS-terminated proxy outside the LAN.
 pub struct WsTransport {
     stream: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -72,21 +89,16 @@ pub struct WsTransport {
 }
 
 impl WsTransport {
-    pub async fn connect(url: &str, auth: Option<&str>) -> Result<Self, TransportError> {
-        let url = build_url(url, auth)?;
-        tracing::info!(%url, "connecting websocket");
-        let (stream, response) = tokio_tungstenite::connect_async(url.as_str()).await?;
-        tracing::info!(status = ?response.status(), "websocket connected");
-        Ok(Self {
-            stream,
-            framing: Framing::JsonText,
-        })
-    }
-
     /// Connects to the plain WebSocket endpoint (no query token).
     pub async fn connect_url(url: String) -> Result<Self, TransportError> {
-        let (stream, response) = tokio_tungstenite::connect_async(url.as_str()).await?;
-        tracing::info!(%url, status = ?response.status(), "websocket connected");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio_tungstenite::connect_async(url.as_str()),
+        )
+        .await
+        .map_err(|_| TransportError::Io(format!("websocket upgrade to {url} timed out")))?;
+        let (stream, response) = result?;
+        tracing::debug!(%url, status = ?response.status(), "websocket connected");
         Ok(Self {
             stream,
             framing: Framing::JsonText,
@@ -103,6 +115,9 @@ impl WsTransport {
 
 /// Token is appended for direct (non-Echo) connections. The `hello` message
 /// additionally carries the token, which is what Laravel validates.
+///
+/// Currently unused (`hello.token` is the contract), kept because a future
+/// Reverb channel-auth setup may want the query parameter instead.
 #[allow(dead_code)]
 fn build_url(base: &str, auth: Option<&str>) -> Result<String, TransportError> {
     let Some(auth) = auth.filter(|a| !a.is_empty()) else {
@@ -114,6 +129,7 @@ fn build_url(base: &str, auth: Option<&str>) -> Result<String, TransportError> {
 
 /// Minimal query-parameter encoder – tokens are `[A-Za-z0-9._~|-]` in practice
 /// (Sanctum), anything else is percent-encoded.
+#[allow(dead_code)]
 fn percent_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -187,6 +203,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn url_without_token_is_unchanged() {
         assert_eq!(
             build_url("ws://localhost/app", None).unwrap(),
@@ -195,6 +212,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn token_is_appended_as_query() {
         assert_eq!(
             build_url("ws://localhost/app?x=1", Some("abc")).unwrap(),
@@ -203,6 +221,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn token_is_percent_encoded() {
         assert_eq!(percent_encode("a b&c"), "a%20b%26c");
     }

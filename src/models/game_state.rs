@@ -16,7 +16,53 @@ use crate::core::{MatchId, PlayerId, Tick, Vec2};
 use crate::models::visual::VisualState;
 use crate::models::world::{PlayerState, RoundInfo};
 use crate::net::connection::ConnectionStatus;
-use crate::protocol::message::Phase;
+use crate::protocol::message::{Phase, Welcome};
+
+/// Playfield extents in world units.
+///
+/// The server owns the map; the client only needs the size for the camera and
+/// for drawing the border. Until the welcome carries real dimensions the
+/// Laravel defaults (`config/lanbash.php` → `gameplay.world`) are used.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorldBounds {
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Default for WorldBounds {
+    fn default() -> Self {
+        Self {
+            width: 3200.0,
+            height: 1800.0,
+        }
+    }
+}
+
+impl WorldBounds {
+    pub fn from_dimensions(width: f32, height: f32) -> Self {
+        if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
+            Self { width, height }
+        } else {
+            Self::default()
+        }
+    }
+
+    /// Uses `welcome.world` when the server announced one.
+    pub fn from_welcome(welcome: &Welcome) -> Self {
+        welcome
+            .world
+            .map(|world| Self::from_dimensions(world.width, world.height))
+            .unwrap_or_default()
+    }
+
+    pub fn center(self) -> Vec2 {
+        Vec2::new(self.width * 0.5, self.height * 0.5)
+    }
+
+    pub fn contains(self, point: Vec2) -> bool {
+        (0.0..=self.width).contains(&point.x) && (0.0..=self.height).contains(&point.y)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct GameState {
@@ -32,6 +78,11 @@ pub struct GameState {
     pub server_tick: Tick,
     /// Tick rate announced by the server.
     pub tick_rate: u32,
+    /// Playfield extents (server-provided when available).
+    pub world: WorldBounds,
+    /// Server-announced movement speed (world units/s), used *only* for local
+    /// visual prediction. `None` until the server sends it.
+    pub move_speed: Option<f32>,
     /// Measured round-trip latency in ms (smoothed).
     pub latency_ms: f32,
     /// **Render-only** predicted position of our own player.
@@ -42,6 +93,10 @@ pub struct GameState {
     pub local_override: Option<Vec2>,
     /// Purely local animation state (never sent, never validated).
     pub visuals: VisualState,
+    /// Highest input sequence the server acknowledged, for diagnostics.
+    pub acked_input_sequence: Option<u64>,
+    /// How often the replay buffer overflowed (diagnostics; 0 is expected).
+    pub buffer_overflows: u64,
     /// Last error from the server or transport, for the HUD.
     pub last_error: Option<String>,
 }
@@ -57,9 +112,13 @@ impl Default for GameState {
             round: RoundInfo::default(),
             server_tick: Tick::ZERO,
             tick_rate: 60,
+            world: WorldBounds::default(),
+            move_speed: None,
             latency_ms: 0.0,
             local_override: None,
             visuals: VisualState::default(),
+            acked_input_sequence: None,
+            buffer_overflows: 0,
             last_error: None,
         }
     }
@@ -111,6 +170,11 @@ impl GameState {
         self.visuals.clear();
         self.local_override = None;
         self.server_tick = Tick::ZERO;
+        self.acked_input_sequence = None;
+        self.buffer_overflows = 0;
+        // `world` and `move_speed` are configuration, not session state: the
+        // welcome re-sends them anyway, and keeping them avoids a frame with a
+        // 0×0 map.
     }
 }
 

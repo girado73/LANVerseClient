@@ -56,7 +56,15 @@ pub fn draw_player(
 ) {
     let body = player_color(&player.id);
     let flash = visuals.is_some_and(|v| v.hit_flash > 0.0);
-    let fill = if flash { Color::WHITE } else { body };
+    // Dead players stay on the map (the server keeps them in the snapshot
+    // until the respawn) but are drawn desaturated and flattened.
+    let fill = if !player.is_alive {
+        Color::new(70, 68, 82, 255)
+    } else if flash {
+        Color::WHITE
+    } else {
+        body
+    };
     let outline = if is_local {
         Color::new(250, 240, 140, 255)
     } else {

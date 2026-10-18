@@ -7,6 +7,8 @@
 
 use std::time::Duration;
 
+use lan_bash_client::app::ClientApp;
+use lan_bash_client::config::ClientConfig;
 use lan_bash_client::config::NetConfig;
 use lan_bash_client::core::Vec2;
 use lan_bash_client::input::InputBuffer;
@@ -196,24 +198,68 @@ fn mock_driver_stops_cleanly_on_disconnect() {
 
 #[test]
 fn headless_loop_keeps_an_explicit_mock_connection() {
-    use lan_bash_client::app::ClientApp;
-    use lan_bash_client::config::ClientConfig;
-
     // Regression: `run_headless` used to call `connect()` unconditionally and
     // silently replace an explicitly configured (mock) session.
+    //
+    // No runtime is provided on purpose: `run_headless` waits for the session
+    // (`wait_for_session`) and must therefore bring its *own* runtime –
+    // otherwise "playing without the server" is exactly as broken as this test
+    // used to be under plain `cargo test`. It is also what `main` does.
     let mut app = ClientApp::new(ClientConfig::default());
     app.connect_mock(MockServerConfig {
         // Fast snapshots so a short headless run is deterministic.
         snapshot_interval_ms: 10,
         ..Default::default()
     });
-    // ~60 ticks at 60 Hz ≈ 1 s of simulated time, plenty for a 10 ms server.
-    app.run_headless(Some(60)).unwrap();
+    // ~120 ticks at 60 Hz ≈ 2 s of simulated time. (`run_headless` waits for
+    // the handshake itself, so the mock server's first snapshot at ~10 ms is
+    // always in.)
+    app.run_headless(Some(120)).unwrap();
 
     assert!(app.state().is_connected(), "mock connection was dropped");
     assert_eq!(app.state().phase, Phase::Running);
     assert!(
         !app.state().players.is_empty(),
         "snapshots never reached the headless loop"
+    );
+}
+
+/// Regression for the "input buffer full" flood in the GUI client.
+///
+/// Root cause was not the sampling rate: `Predictor::on_snapshot` (the only
+/// place acknowledged inputs are pruned, and the only source of prediction
+/// authority) was never called outside unit tests. The replay buffer therefore
+/// only ever grew, and the local player was never predicted.
+#[test]
+fn acknowledged_inputs_are_pruned_while_playing() {
+    let runtime = lan_bash_client::app::runtime::build_tokio_runtime().unwrap();
+    let _enter = runtime.enter();
+
+    let mut app = ClientApp::new(ClientConfig::default());
+    app.connect_mock(MockServerConfig {
+        snapshot_interval_ms: 20,
+        ..Default::default()
+    });
+    // ~3 s at 60 Hz: long enough for hundreds of samples to be acked.
+    app.run_headless(Some(180)).unwrap();
+
+    assert!(app.state().is_connected());
+    assert!(
+        app.state().acked_input_sequence.unwrap_or(0) > 0,
+        "server never acknowledged any input"
+    );
+    assert!(
+        app.pending_inputs() < 30,
+        "replay buffer is not pruned by acks: {} pending",
+        app.pending_inputs()
+    );
+    assert_eq!(
+        app.state().buffer_overflows,
+        0,
+        "acknowledged inputs should never overflow the buffer"
+    );
+    assert!(
+        app.state().local_override.is_some(),
+        "no prediction authority: snapshots never reached the predictor"
     );
 }

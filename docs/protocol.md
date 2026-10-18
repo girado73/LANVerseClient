@@ -2,30 +2,46 @@
 
 This document is the contract between the Rust client and the Laravel game
 server. Anything not described here must be treated as *not authoritative* by
-the client.
+the client. It is verified against the Laravel implementation in
+`app/Realtime/Protocol/`.
 
 - **Transport:** WebSocket, one JSON object per text frame.
+- **Endpoint:** `ws://<host>:8080/app/<REVERB_APP_KEY>`.
+  `php artisan game:serve --port=8080` routes the game protocol behind the
+  Reverb app path; `/app` without the key fails with **HTTP 403**.
 - **Version:** `PROTOCOL_VERSION = 1` (`src/protocol/mod.rs`).
-  Any breaking change bumps it; the client refuses to run against a mismatched
-  version (`welcome.protocol_version`).
+  A mismatched `welcome.protocol_version` fails the connection.
 - **Tagging:** every message has `"type"` (snake_case). Server → client
   gameplay events use `"event"` inside a `type: "event"` envelope.
 
 Unknown `type`s and unknown `event`s are **ignored**, so the server can add
 messages/events without breaking older clients.
 
+### Tolerated non-game frames
+
+Reverb sends its own `pusher:connection_established` event on every socket
+before the game protocol starts:
+
+```json
+{ "event": "pusher:connection_established", "data": "{\"socket_id\":\"1.2\"}" }
+```
+
+Frames without a `type` are treated as "not protocol" and ignored. They never
+kill the session and never reach the game state.
+
 ## Connection sequence
 
 ```text
 client                                          server (Laravel)
-   │  WS upgrade  ?auth=<token>                     │
+   │  WS upgrade  /app/<key>                        │
    │ ─────────────────────────────────────────────► │
-   │                                                │  validate token (optional)
+   │  {"event":"pusher:connection_established"}     │  (ignored by the client)
+   │ ◄───────────────────────────────────────────── │
    │  {"type":"hello", "protocol_version":1, ...}   │
    │ ─────────────────────────────────────────────► │
    │  {"type":"welcome", "player_id":…, "tick_rate":60, "server_tick":0}
    │ ◄───────────────────────────────────────────── │
-   │  {"type":"round_state", "phase":"running"}      │
+   │  {"type":"round_state", "phase":"countdown"}   │
    │ ◄───────────────────────────────────────────── │
    │  {"type":"input", "sequence":1, …}  (every tick)│
    │ ─────────────────────────────────────────────► │
@@ -38,15 +54,18 @@ considers the session *connected* only after `welcome`.
 
 ### Timeouts and reconnects
 
-| Parameter              | Value                     |
-|------------------------|---------------------------|
-| Client ping            | every 2 s                 |
-| Heartbeat watchdog     | no message for 15 s ⇒ reconnect |
-| Reconnect backoff      | 500 ms, 1 s, 2 s … capped at 10 s, 12 attempts |
+| Parameter              | Value                                      |
+|------------------------|--------------------------------------------|
+| Connect timeout        | 5 s (+ 10 s hard limit inside the transport) |
+| Handshake timeout      | 5 s without `welcome` ⇒ retry              |
+| Client ping            | every 2 s                                  |
+| Heartbeat watchdog     | no message for 8 s ⇒ reconnect             |
+| Reconnect backoff      | 0.5 s, 1 s, 2 s … capped at 2 s            |
+| Max attempts           | unlimited (`0` = forever) – a client may start before the server |
 | Fatal errors           | `error` with `"fatal": true`, or protocol mismatch ⇒ no reconnect |
 
-The server should either answer the client's `ping` or send data at least
-every 15 s.
+The server answers `ping` with `pong` and sends snapshots at 20 Hz, so a healthy
+link never trips the watchdog.
 
 ## Client → Server
 
@@ -63,8 +82,10 @@ every 15 s.
 }
 ```
 
-Sent once per connection, directly after the socket opens. Duplicate hellos on
-the same socket are ignored by both sides.
+Sent once per connection, directly after the socket opens. With a valid token
+the server uses the account's profile name and ignores `player_name`
+(`GameIdentity::displayName()`). Duplicate hellos on the same socket are
+ignored by the server.
 
 ### `input` (from `AGENTS.md`)
 
@@ -81,13 +102,19 @@ the same socket are ignored by both sides.
 | field         | meaning                                                         |
 |---------------|-----------------------------------------------------------------|
 | `client_tick` | client's estimate of the current server tick                    |
-| `sequence`    | monotonic per connection; echo the **highest processed** in `snapshot.acked_input_sequence` |
+| `sequence`    | monotonic per player; the server ignores `sequence <= acked_input_sequence` |
 | `movement`    | normalized intent, length ≤ 1, `{x,y}` in `[-1,1]`              |
 | `actions`     | edge-triggered one-shots: `jump`, `dash`, `use_item`, `interact`, `emote` |
 
-Inputs are sent once per client tick (60 Hz by default). They are *intent*:
-the server decides position, collisions and the effect of every action.
-Dropped inputs are fine; the next one supersedes them.
+Inputs are *intent*: the server decides position, collisions and the effect of
+every action. Dropped inputs are fine; the next one supersedes them.
+
+Server mapping (current implementation): `dash`, `jump` and `interact` are
+executed; `interact` is the attack. `use_item` and `emote` are accepted but
+ignored.
+
+**Sequence rules for the client.** After a reconnect the counter must continue
+above the last acknowledged sequence, otherwise every input is discarded.
 
 ### `ping`
 
@@ -105,38 +132,40 @@ Dropped inputs are fine; the next one supersedes them.
   "protocol_version": 1,
   "player_id": "p-17",
   "session_id": "s-…",          // optional
-  "match_id": "m-42",           // optional
+  "match_id": "lan-20261017",   // optional
   "tick_rate": 60,              // server simulation Hz – the client adopts this
   "server_tick": 0,
   "message": "Welcome, Alice"   // optional
 }
 ```
 
-`tick_rate` must be within `1..=240`; the client validates and rejects the
-connection otherwise.
+`tick_rate` must be within `1..=240`; the client rejects the connection
+otherwise. `world` (`{width, height}`) and `move_speed` are accepted if a future
+server adds them; today they are absent and the client falls back to the
+server defaults from `config/lanbash.php` (world 3200×1800, speed 220).
 
 ### `snapshot` (authoritative world state)
 
-Send at a fixed rate (10–20 Hz is plenty; the client interpolates).
+Sent at 20 Hz (`LANBASH_SNAPSHOT_RATE`).
 
 ```json
 {
   "type": "snapshot",
   "tick": 1204,
   "acked_input_sequence": 812,          // highest input processed from THIS client
-  "round": { "round_id": "r-3", "time_left_ms": 42000 },
+  "round": { "round_id": "lan-20261017", "time_left_ms": 179000 },
   "players": [
     {
       "id": "p-17",
       "name": "Alice",
-      "position": { "x": 120.5, "y": 90 },
+      "position": { "x": 768.62, "y": 630 },
       "velocity": { "x": 0, "y": 0 },
       "facing": { "x": 1, "y": 0 },
       "hp": 100,
       "max_hp": 100,
       "is_alive": true,
-      "score": 3,
-      "team": "red"
+      "score": 0,
+      "team": null                      // null in free-for-all
     }
   ]
 }
@@ -150,8 +179,12 @@ Send at a fixed rate (10–20 Hz is plenty; the client interpolates).
 - `|position| ≤ 1e6`,
 - non-decreasing `tick` (older snapshots are ignored).
 
+`acked_input_sequence` is **per player** and monotonic. Even an out-of-order
+snapshot's ack is applied, because it is never stale on its own.
+
 Each snapshot is a **full** list of players; players missing from a snapshot
-are hidden. The client never predicts other players.
+are hidden. The client never predicts other players. Positions are rounded to
+two decimals – the client interpolates anyway.
 
 ### `event`
 
@@ -165,8 +198,10 @@ creates these events itself.
   "attacker": "p-17", "victim": "p-18", "damage": 12,
   "remaining_hp": 88, "position": { "x": 140, "y": 92 } }
 { "type": "event", "event": "item_picked",       "player_id": "p-17", "item_id": "i-9" }
-{ "type": "event", "event": "score_changed",     "player_id": "p-17", "score": 4, "team": "red" }
+{ "type": "event", "event": "score_changed",     "player_id": "p-17", "score": 4 }
 ```
+
+`score_changed` omits `team` outside team modes.
 
 ### `round_state`
 
@@ -174,14 +209,18 @@ creates these events itself.
 {
   "type": "round_state",
   "phase": "countdown",           // connecting | lobby | countdown | running | finished
-  "round": "r-3",
-  "round_number": 3,
-  "countdown_ms": 3000,
+  "round": "lan-20261017",        // omitted while no round exists
+  "round_number": 1,              // omitted while no round exists
+  "countdown_ms": 3000,           // 0 outside the countdown
   "winner": "red"                 // optional
 }
 ```
 
 The client only accepts gameplay input while `phase == "running"`.
+
+`countdown_ms` is authoritative **only** during `countdown`; outside of it the
+server sends `0`, which the client ignores (the round timer comes from the
+snapshots).
 
 ### `pong`
 
@@ -194,6 +233,9 @@ The client only accepts gameplay input while `phase == "running"`.
 ```json
 { "type": "error", "code": "auth_failed", "message": "Invalid token", "fatal": true }
 ```
+
+Codes: `protocol_mismatch`, `auth_failed`, `match_not_found`, `match_full`,
+`invalid_hello`, `invalid_message`, `bad_request`, `server_error`.
 
 `fatal: true` stops reconnecting and shows the error in the HUD.
 
@@ -208,3 +250,6 @@ The client only accepts gameplay input while `phase == "running"`.
    extrapolation is performed.
 4. If the client falls behind by more than 8 ticks in one frame the backlog is
    dropped; the server state re-syncs it automatically.
+5. When the connection drops, all session-scoped state (player id, players,
+   round, prediction, interpolation buffer) is cleared. A ready-state frame
+   from the game loop never runs against stale data.

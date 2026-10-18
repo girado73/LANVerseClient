@@ -86,7 +86,11 @@ impl DesktopPlatform {
             .resizable()
             .vsync()
             .build();
-        rl.set_target_fps(config.target_fps);
+        // VSync already paces the loop; a second cap makes raylib wait twice
+        // per frame (visible judder). Only cap explicitly when asked to.
+        if config.target_fps > 0 {
+            rl.set_target_fps(config.target_fps);
+        }
 
         let pipeline = RenderPipeline::new(&mut rl, &thread, config)?;
         Ok(Self {

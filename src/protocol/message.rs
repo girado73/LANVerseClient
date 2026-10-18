@@ -12,6 +12,10 @@ use crate::protocol::PROTOCOL_VERSION;
 /// Any message that can travel over the socket, in either direction.
 ///
 /// Internally tagged: `{"type": "snapshot", "tick": 18420, …}`.
+///
+/// The variants only ever fail to deserialize for *semantic* reasons (e.g. an
+/// unknown `phase`). Unknown `type`s end up in [`ProtocolMessage::Unknown`] and
+/// are ignored by [`crate::net::events::classify`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProtocolMessage {
@@ -38,6 +42,9 @@ pub enum ProtocolMessage {
     Error(ServerError),
 
     /// Unknown/unhandled message type – ignored by the client.
+    ///
+    /// This must stay the **last** variant: serde tries untagged variants after
+    /// every tagged one, so it only ever matches frames whose `type` is unknown.
     #[serde(untagged)]
     Unknown(serde_json::Value),
 }
@@ -151,6 +158,15 @@ pub struct Welcome {
     pub server_tick: u64,
     #[serde(default)]
     pub message: Option<String>,
+    /// Optional authoritative world size in world units (Laravel's `world`
+    /// config is 3200×1800). The server does not send it yet; when absent the
+    /// client falls back to its default playfield.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world: Option<WorldState>,
+    /// Optional movement speed in world units per second, used only for local
+    /// *visual* prediction. The server does not send it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_speed: Option<f32>,
 }
 
 /// One authoritative world state at a given tick.
@@ -169,11 +185,26 @@ pub struct Snapshot {
     /// Unused in the prototype but reserved for rollback-based prediction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_time_ms: Option<u64>,
+    /// Authoritative world size, if the server chose to include it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world: Option<WorldState>,
 }
 
+/// Immutable world metadata mirrored from the server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorldState {
+    pub width: f32,
+    pub height: f32,
+}
+
+/// `round` object inside a snapshot.
+///
+/// Laravel sends `{"round_id": "lan-20261017", "time_left_ms": 179000}`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RoundSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round_id: Option<RoundId>,
+    #[serde(default)]
     pub time_left_ms: u32,
 }
 
@@ -226,6 +257,13 @@ pub enum Phase {
     Finished,
 }
 
+/// `{"type": "round_state"}` – match lifecycle.
+///
+/// Laravel always includes `phase` and `countdown_ms` (`0` outside the
+/// countdown) and omits `round`/`round_number`/`winner` while they are unset.
+/// `countdown_ms: 0` therefore means "not counting down", *not* "time is up",
+/// which is why this is an [`Option`] with an explicit zero → [`None`] mapping
+/// in [`RoundState::from_wire`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoundState {
     pub phase: Phase,
@@ -233,11 +271,22 @@ pub struct RoundState {
     pub round: Option<RoundId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round_number: Option<u32>,
-    /// e.g. countdown remaining or final result text.
+    /// Remaining countdown, only meaningful while `phase == countdown`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub countdown_ms: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub winner: Option<String>,
+}
+
+impl RoundState {
+    /// Normalizes the wire representation: Laravel sends `round_number: 0` and
+    /// `countdown_ms: 0` instead of omitting them. Neither is a real value.
+    pub fn from_wire(raw: serde_json::Value) -> serde_json::Result<Self> {
+        let mut state: Self = serde_json::from_value(raw)?;
+        state.round_number = state.round_number.filter(|n| *n > 0);
+        state.countdown_ms = state.countdown_ms.filter(|ms| *ms > 0);
+        Ok(state)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -364,5 +413,98 @@ mod tests {
     #[test]
     fn malformed_json_is_an_error() {
         assert!(ProtocolMessage::from_json_str("{not json").is_err());
+    }
+
+    #[test]
+    fn laravel_welcome_parses_without_new_optional_fields() {
+        // Exactly what WelcomeMessage::toArray() produces.
+        let raw = r#"{"type":"welcome","protocol_version":1,"player_id":"p-7",
+                      "session_id":"s-1","match_id":"lan-20261017",
+                      "tick_rate":60,"server_tick":0,"message":"Welcome"}"#;
+        let ProtocolMessage::Welcome(welcome) = ProtocolMessage::from_json_str(raw).unwrap() else {
+            panic!("expected welcome");
+        };
+        assert_eq!(welcome.player_id, PlayerId::from("p-7"));
+        assert!(welcome.world.is_none());
+        assert!(welcome.move_speed.is_none());
+    }
+
+    #[test]
+    fn laravel_round_state_parses() {
+        let raw = r#"{"type":"round_state","phase":"countdown","round":"lan-20261017",
+                      "round_number":1,"countdown_ms":3000}"#;
+        let state = RoundState::from_wire(serde_json::from_str(raw).unwrap()).unwrap();
+        assert_eq!(state.phase, Phase::Countdown);
+        assert_eq!(state.round_number, Some(1));
+        assert_eq!(state.countdown_ms, Some(3000));
+    }
+
+    #[test]
+    fn zero_countdown_means_not_counting() {
+        let raw = r#"{"type":"round_state","phase":"running","round":"r","round_number":1,"countdown_ms":0}"#;
+        let state = RoundState::from_wire(serde_json::from_str(raw).unwrap()).unwrap();
+        assert_eq!(state.countdown_ms, None);
+        // Laravel omits round/round_number before a round exists.
+        let raw = r#"{"type":"round_state","phase":"lobby","countdown_ms":0}"#;
+        let state = RoundState::from_wire(serde_json::from_str(raw).unwrap()).unwrap();
+        assert_eq!(state.phase, Phase::Lobby);
+        assert_eq!(state.round_number, None);
+    }
+
+    #[test]
+    fn laravel_snapshot_parses() {
+        let raw = r#"{"type":"snapshot","tick":180,"acked_input_sequence":177,
+                      "round":{"round_id":"lan-20261017","time_left_ms":180000},
+                      "players":[{"id":"p-1","name":"Alice","position":{"x":768.62,"y":630},
+                      "velocity":{"x":0,"y":0},"facing":{"x":1,"y":0},"hp":100,"max_hp":100,
+                      "is_alive":true,"score":0,"team":null}]}"#;
+        let ProtocolMessage::Snapshot(snap) = ProtocolMessage::from_json_str(raw).unwrap() else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(snap.acked_input_sequence, Some(177));
+        let round = snap.round.clone().expect("round");
+        assert_eq!(round.time_left_ms, 180_000);
+        assert_eq!(round.round_id, Some(RoundId::from("lan-20261017")));
+        assert_eq!(snap.players[0].team, None);
+        snap.validate().unwrap();
+    }
+
+    #[test]
+    fn laravel_events_parse() {
+        let hit = r#"{"type":"event","event":"player_hit","attacker":"p-1","victim":"p-2",
+                      "damage":12,"remaining_hp":88,"position":{"x":140,"y":92}}"#;
+        let ProtocolMessage::Event(GameEvent::PlayerHit { remaining_hp, .. }) =
+            ProtocolMessage::from_json_str(hit).unwrap()
+        else {
+            panic!("expected player_hit");
+        };
+        assert_eq!(remaining_hp, Some(88));
+
+        let score = r#"{"type":"event","event":"score_changed","player_id":"p-1","score":3}"#;
+        let ProtocolMessage::Event(GameEvent::ScoreChanged { team, .. }) =
+            ProtocolMessage::from_json_str(score).unwrap()
+        else {
+            panic!("expected score_changed");
+        };
+        assert_eq!(team, None);
+    }
+
+    #[test]
+    fn laravel_error_parses() {
+        let raw = r#"{"type":"error","code":"auth_failed","message":"Invalid token","fatal":true}"#;
+        let ProtocolMessage::Error(error) = ProtocolMessage::from_json_str(raw).unwrap() else {
+            panic!("expected error");
+        };
+        assert_eq!(error.code, "auth_failed");
+        assert!(error.fatal);
+    }
+
+    #[test]
+    fn pusher_envelope_is_unknown_not_an_error() {
+        // Laravel Reverb sends `pusher:connection_established` before the game
+        // protocol starts; it must never kill the session.
+        let raw = r#"{"event":"pusher:connection_established","data":"{\"socket_id\":\"1.2\"}"}"#;
+        let msg = ProtocolMessage::from_json_str(raw).unwrap();
+        assert!(matches!(msg, ProtocolMessage::Unknown(_)));
     }
 }

@@ -84,6 +84,32 @@ impl RenderPipeline {
         draw(&mut mode);
     }
 
+    /// Mean luminance of the last rendered frame (0..255).
+    ///
+    /// Reads the internal texture back from the GPU. Diagnostic only: it is
+    /// slow and must not be used in the hot path. Used to tell "the content
+    /// really changes" apart from "the window presents wrongly", which look
+    /// identical to a player describing a flicker.
+    pub fn mean_luma(&self) -> Option<f32> {
+        // SAFETY: read-only GPU readback of a texture this struct owns; the
+        // image is unloaded before returning and the slice never outlives it.
+        unsafe {
+            let texture = self.internal.texture();
+            let image = raylib::ffi::LoadImageFromTexture(*texture.as_ref());
+            if image.data.is_null() || image.width <= 0 || image.height <= 0 {
+                return None;
+            }
+            let pixels = (image.width * image.height) as usize;
+            let bytes = std::slice::from_raw_parts(image.data as *const u8, pixels * 4);
+            let sum: u64 = bytes
+                .chunks_exact(4)
+                .map(|p| (u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2])) as u64 / 3)
+                .sum();
+            raylib::ffi::UnloadImage(image);
+            Some(sum as f32 / pixels as f32)
+        }
+    }
+
     /// Blits the internal texture onto the window, letterboxed and integer-scaled.
     pub fn present(&self, d: &mut impl RaylibDraw, window_width: i32, window_height: i32) {
         let scale = (window_width as f32 / self.width as f32)

@@ -15,21 +15,42 @@ pub struct PlayerState {
     #[serde(default)]
     pub name: String,
     pub position: Vec2,
-    /// Reserved: the server currently does not send velocity, but the protocol
-    /// tolerates it for interpolation/extrapolation.
+    /// The server does send velocity; it is display-only (interpolation and
+    /// the run/idle animation), never used for movement decisions.
     #[serde(default)]
     pub velocity: Vec2,
     /// Last movement direction the server accepted (for sprite facing).
     #[serde(default = "facing_default")]
     pub facing: Vec2,
-    pub hp: u32,
+    /// Laravel assumes a sane 100 HP when the field is missing.
+    #[serde(default = "default_max_hp")]
     pub max_hp: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default = "default_max_hp")]
+    pub hp: u32,
+    /// `null` for free-for-all modes – Laravel always sends the key.
+    #[serde(default, deserialize_with = "null_as_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
     #[serde(default)]
     pub score: i32,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub is_alive: bool,
+}
+
+fn default_max_hp() -> u32 {
+    100
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Accepts both an absent and an explicit `null` value as `None`.
+fn null_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
 }
 
 impl PlayerState {
@@ -68,6 +89,13 @@ impl Default for PlayerState {
     }
 }
 
+impl PlayerState {
+    /// Whether the server reports this player as moving. Display-only.
+    pub fn is_moving(&self) -> bool {
+        self.is_alive && self.velocity.length_squared() > 1.0
+    }
+}
+
 /// Round/match information mirrored from `RoundState` snapshots.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RoundInfo {
@@ -75,4 +103,36 @@ pub struct RoundInfo {
     pub number: Option<u32>,
     pub time_left_ms: u32,
     pub winner: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn laravel_nulls_and_missing_fields_deserialize() {
+        let raw = r#"{"id":"p-1","name":"Alice","position":{"x":1,"y":2},
+                      "velocity":{"x":0,"y":0},"facing":{"x":1,"y":0},
+                      "hp":100,"max_hp":100,"is_alive":true,"score":0,"team":null}"#;
+        let player: PlayerState = serde_json::from_str(raw).unwrap();
+        assert_eq!(player.team, None);
+        assert!(player.is_alive);
+
+        // Minimal payload: hp/max_hp/is_alive fall back to healthy defaults.
+        let raw = r#"{"id":"p-2","position":{"x":0,"y":0}}"#;
+        let player: PlayerState = serde_json::from_str(raw).unwrap();
+        assert_eq!(player.hp, 100);
+        assert_eq!(player.max_hp, 100);
+        assert!(player.is_alive);
+    }
+
+    #[test]
+    fn movement_is_display_only() {
+        let mut player = PlayerState::default();
+        assert!(!player.is_moving());
+        player.velocity = Vec2::new(120.0, 0.0);
+        assert!(player.is_moving());
+        player.is_alive = false;
+        assert!(!player.is_moving());
+    }
 }
