@@ -7,7 +7,7 @@
 //! [`parse_frame`] therefore decodes the `type` first and decodes only the
 //! matching variant, so:
 //!
-//! * an unknown `type` (e.g. Reverb's `pusher:connection_established`) is
+//! * an unknown `type` (e.g. `pusher:connection_established`) is
 //!   [`ProtocolMessage::Unknown`],
 //! * a frame that has the right `type` but a broken body is a
 //!   [`DecodeFailure`] – the caller logs it and keeps the session alive.
@@ -40,7 +40,7 @@ pub fn parse_frame(raw: &str) -> Result<ProtocolMessage, DecodeFailure> {
         return Err(DecodeFailure::NotAnObject);
     };
     let Some(type_name) = object.get("type").and_then(|t| t.as_str()) else {
-        // Frames without a `type` are not from the game protocol – Reverb's
+        // Frames without a `type` are not from the game protocol – the legacy
         // own envelopes look like `{"event":"pusher:…","data":…}`. Absorb them
         // instead of treating them as protocol errors.
         if object.contains_key("event") {

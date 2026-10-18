@@ -49,7 +49,7 @@ pub fn classify(message: ProtocolMessage, latency: &mut LatencyEstimator) -> Vec
             .map(|rtt| vec![NetEvent::Latency(rtt)])
             .unwrap_or_default(),
         ProtocolMessage::Error(error) => vec![NetEvent::ServerError(error)],
-        // Reverb's own `pusher:*` envelopes and anything newer than this client
+        // `pusher:*` envelopes (legacy transport) and anything newer than this client
         // arrive here – debug level only, they are not interesting per message.
         ProtocolMessage::Unknown(_) => Vec::new(),
         // A client->server message arriving from the server is nonsense.

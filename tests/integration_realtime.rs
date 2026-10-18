@@ -4,7 +4,7 @@
 //! level: handshake, framing, timeouts and reconnect used to be untested. These
 //! tests run the actual [`WsTransport`] and [`session`] driver against a
 //! `tokio-tungstenite` server on `127.0.0.1:0`, speaking the exact payloads
-//! Laravel's `game:serve` sends (see `docs/protocol.md`).
+//! the game server sends (see `docs/protocol.md`).
 //!
 //! Everything is bounded by real timeouts, so a regression shows up as a
 //! failing assertion, never as a hanging test.
@@ -28,7 +28,7 @@ enum Behaviour {
     /// Send `welcome` + a running `round_state` + snapshots, like a healthy
     /// `game:serve`.
     Healthy,
-    /// Accept the socket, send Reverb's `pusher:connection_established` and
+    /// Accept the socket, send `pusher:connection_established` and
     /// then never answer the game protocol.
     Silent,
 }
@@ -61,7 +61,7 @@ async fn start_server(behaviour: Behaviour) -> FakeServer {
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
                     return;
                 };
-                // Reverb always greets first – the client must ignore it.
+                // The server greets first – the client must ignore it.
                 let _ = ws
                     .send(Message::Text(
                         r#"{"event":"pusher:connection_established","data":"{\"socket_id\":\"1.2\"}"}"#
@@ -142,7 +142,7 @@ async fn send(
         .await;
 }
 
-/// Verbatim shape of Laravel's `WelcomeMessage` (no world/move_speed yet).
+/// Verbatim shape of the server's welcome frame (no world/move_speed yet).
 fn welcome() -> lan_bash_client::protocol::message::Welcome {
     parse_frame(
         r#"{"type":"welcome","protocol_version":1,"player_id":"p-1","session_id":"s-1",
@@ -155,7 +155,7 @@ fn welcome() -> lan_bash_client::protocol::message::Welcome {
     .unwrap()
 }
 
-/// Verbatim shape of Laravel's `SnapshotMessage` (including `team: null`).
+/// Verbatim shape of the server's snapshot frame (including `team: null`).
 fn snapshot_json(tick: u64, acked: u64) -> String {
     format!(
         r#"{{"type":"snapshot","tick":{tick},"acked_input_sequence":{acked},
@@ -231,7 +231,7 @@ fn real_websocket_handshake_and_snapshots() {
         state.match_id.as_ref().map(|m| m.as_str()),
         Some("lan-20261018")
     );
-    // The Laravel world size is only known because the client defaults to it.
+    // The world size is only known because the client defaults to it.
     assert_eq!(state.world.width, 3200.0);
 
     // The client must have answered with a hello carrying its name.

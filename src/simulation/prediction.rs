@@ -35,7 +35,7 @@ use crate::protocol::message::Snapshot;
 /// These are *guesses* used for visual prediction. They must never be used to
 /// validate or override server data – if the server says otherwise, it wins.
 /// A wrong speed is visible as rubber-banding, so the default mirrors the
-/// Laravel default (`config/lanbash.php` → `gameplay.player.move = 220`) until
+/// Server default (220 units/s) until
 /// the server announces `welcome.move_speed`.
 #[derive(Debug, Clone, Copy)]
 pub struct MovementModel {

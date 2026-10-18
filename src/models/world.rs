@@ -22,12 +22,12 @@ pub struct PlayerState {
     /// Last movement direction the server accepted (for sprite facing).
     #[serde(default = "facing_default")]
     pub facing: Vec2,
-    /// Laravel assumes a sane 100 HP when the field is missing.
+    /// Assume a sane 100 HP when the field is missing.
     #[serde(default = "default_max_hp")]
     pub max_hp: u32,
     #[serde(default = "default_max_hp")]
     pub hp: u32,
-    /// `null` for free-for-all modes – Laravel always sends the key.
+    /// `null` for free-for-all modes – the server always sends the key.
     #[serde(default, deserialize_with = "null_as_none")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
@@ -126,7 +126,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn laravel_nulls_and_missing_fields_deserialize() {
+    fn nulls_and_missing_fields_deserialize() {
         let raw = r#"{"id":"p-1","name":"Alice","position":{"x":1,"y":2},
                       "velocity":{"x":0,"y":0},"facing":{"x":1,"y":0},
                       "hp":100,"max_hp":100,"is_alive":true,"score":0,"team":null}"#;

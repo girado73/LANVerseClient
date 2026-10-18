@@ -272,7 +272,7 @@ impl HudRenderer {
             (status.as_str(), Color::WHITE),
             (server, Color::new(170, 220, 255, 255)),
             (
-                "Start the server with: php artisan game:serve --port=8080",
+                "Start the server with: cd LANVerseGame && cargo run --release -- serve",
                 Color::new(190, 190, 200, 255),
             ),
         ];

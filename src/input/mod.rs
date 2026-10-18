@@ -25,7 +25,7 @@ pub use source::{InputSample, InputSource, ScriptedInputSource};
 
 /// One-shot intents the server may act on.
 ///
-/// Serialized as lowercase strings (`"jump"`) so the Laravel side reads them
+/// Serialized as lowercase strings (`"jump"`) so the server reads them
 /// from a simple array without positional coupling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

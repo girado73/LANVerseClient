@@ -1,7 +1,7 @@
 //! In-memory transport that behaves like a miniature authoritative server.
 //!
 //! It exists so the *entire* client stack (session driver → handshake →
-//! heartbeat → snapshot ingestion → prediction) can run without Laravel:
+//! heartbeat → snapshot ingestion → prediction) can run without a server:
 //!
 //! * unit/integration tests get a deterministic server,
 //! * `--headless` can run a smoke test in CI,
@@ -10,7 +10,7 @@
 //!
 //! The mock server is deliberately dumb: constant velocity circles for a few
 //! bots, no collisions, no authority subtleties. It is **not** a reference for
-//! server behaviour – the Laravel server remains the source of truth.
+//! server behaviour – the game server remains the source of truth.
 
 use std::time::Duration;
 
@@ -24,7 +24,7 @@ use crate::protocol::PROTOCOL_VERSION;
 use crate::protocol::message::{GameEvent, Phase, ProtocolMessage, RoundState, Snapshot, Welcome};
 
 /// Steps the fake simulation every `tick_ms` milliseconds.
-const DEFAULT_TICK_MS: u64 = 50; // 20 Hz snapshots, like a typical Laravel timer.
+const DEFAULT_TICK_MS: u64 = 50; // 20 Hz snapshots, like the real server.
 
 #[derive(Debug, Clone)]
 pub struct MockServerConfig {
@@ -187,7 +187,7 @@ async fn mock_server(
                             server_tick: tick,
                             message: Some(format!("Welcome, {}", config.player_name)),
                             mode: None,
-                            // Same world and speed as a default Laravel server.
+                            // Same world and speed as the default server.
                             world: Some(crate::protocol::message::WorldState {
                                 width: 3200.0,
                                 height: 1800.0,

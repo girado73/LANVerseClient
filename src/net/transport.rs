@@ -1,7 +1,7 @@
 //! Transport abstraction: "something that can deliver a text message to the
 //! server and yield the server's messages".
 //!
-//! The WebSocket implementation ([`WsTransport`]) is what talks to Laravel.
+//! The WebSocket implementation ([`WsTransport`]) is what talks to the game server.
 //! [`crate::net::mock::MockTransport`] implements the same trait for tests and
 //! the `--headless` offline mode, so everything above the transport (handshake,
 //! heartbeat, snapshot application) is exercised without a server.
@@ -13,7 +13,7 @@ use tokio_tungstenite::tungstenite::{self, Message};
 /// How messages are framed on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Framing {
-    /// JSON over WebSocket **text** frames (Laravel-friendly, default).
+    /// JSON over WebSocket **text** frames (default).
     JsonText,
     /// Reserved: future binary protocol.
     JsonBinary,
@@ -75,10 +75,10 @@ impl MessageTransport for Box<dyn MessageTransport> {
 
 /// WebSocket transport built on `tokio-tungstenite`.
 ///
-/// Connection flow is Laravel Reverb-compatible:
+/// Connection flow:
 /// * The URL is the app endpoint **including the app key**, e.g.
-///   `ws://host:8080/app/<REVERB_APP_KEY>` (`game:serve` routes game frames
-///   behind `/app/{key}`). A URL without the key is rejected with HTTP 403.
+///   `ws://host:8080/` (root path). The former `/app/<key>` suffix is still
+///   accepted by the server as an alias.
 /// * `wss://` works out of the box (rustls + webpki roots), so the same client
 ///   can talk to a TLS-terminated proxy outside the LAN.
 pub struct WsTransport {
@@ -114,10 +114,10 @@ impl WsTransport {
 }
 
 /// Token is appended for direct (non-Echo) connections. The `hello` message
-/// additionally carries the token, which is what Laravel validates.
+/// additionally carries the token, which is what the server validates.
 ///
 /// Currently unused (`hello.token` is the contract), kept because a future
-/// Reverb channel-auth setup may want the query parameter instead.
+/// a future channel-auth setup may want the query parameter instead.
 #[allow(dead_code)]
 fn build_url(base: &str, auth: Option<&str>) -> Result<String, TransportError> {
     let Some(auth) = auth.filter(|a| !a.is_empty()) else {

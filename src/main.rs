@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("starting LAN Bash client: {}", describe(&config));
 
     if mock_server {
-        tracing::info!("using in-memory mock server (no Laravel connection)");
+        tracing::info!("using in-memory mock server (no network)");
     }
 
     let mut app = ClientApp::new(config);

@@ -742,7 +742,7 @@ mod tests {
 
     #[test]
     fn running_round_state_keeps_the_snapshot_timer() {
-        // Laravel sends `countdown_ms: 0` for every non-countdown phase; that
+        // The server sends `countdown_ms: 0` for every non-countdown phase; that
         // used to reset the round clock to 0:00 right after the start.
         let mut client = connected_client();
         let mut state = crate::models::GameState::new();

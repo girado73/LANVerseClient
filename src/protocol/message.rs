@@ -20,7 +20,7 @@ use crate::protocol::PROTOCOL_VERSION;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProtocolMessage {
     // ---- client -> server ----
-    /// First message after the socket opens. Laravel validates it (token,
+    /// First message after the socket opens. The server validates it (token,
     /// match availability) and answers with [`ProtocolMessage::Welcome`].
     Hello(Hello),
     /// One input sample per simulated tick.
@@ -98,7 +98,7 @@ pub struct Hello {
     pub protocol_version: u32,
     /// Display name shown to other players.
     pub player_name: String,
-    /// Laravel auth token (optional for guest play; the server decides).
+    /// Account token (optional for guest play; the server decides).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     /// Which match to join (lobby auto-assigns when omitted).
@@ -214,7 +214,7 @@ pub struct Welcome {
     pub server_tick: u64,
     #[serde(default)]
     pub message: Option<String>,
-    /// Optional authoritative world size in world units (Laravel's `world`
+    /// Optional authoritative world size in world units (the server's `world`
     /// config is 3200×1800). The server does not send it yet; when absent the
     /// client falls back to its default playfield.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -277,7 +277,7 @@ pub struct WorldState {
 
 /// `round` object inside a snapshot.
 ///
-/// Laravel sends `{"round_id": "lan-20261017", "time_left_ms": 179000}`.
+/// The server sends `{"round_id": "lan-20261017", "time_left_ms": 179000}`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RoundSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -353,7 +353,7 @@ pub enum Phase {
 
 /// `{"type": "round_state"}` – match lifecycle.
 ///
-/// Laravel always includes `phase` and `countdown_ms` (`0` outside the
+/// The server always includes `phase` and `countdown_ms` (`0` outside the
 /// countdown) and omits `round`/`round_number`/`winner` while they are unset.
 /// `countdown_ms: 0` therefore means "not counting down", *not* "time is up",
 /// which is why this is an [`Option`] with an explicit zero → [`None`] mapping
@@ -373,7 +373,7 @@ pub struct RoundState {
 }
 
 impl RoundState {
-    /// Normalizes the wire representation: Laravel sends `round_number: 0` and
+    /// Normalizes the wire representation: the server sends `round_number: 0` and
     /// `countdown_ms: 0` instead of omitting them. Neither is a real value.
     pub fn from_wire(raw: serde_json::Value) -> serde_json::Result<Self> {
         let mut state: Self = serde_json::from_value(raw)?;
@@ -406,7 +406,7 @@ pub struct ServerError {
 /// Frame encoding used on the socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoding {
-    /// Text frames with JSON (default; human readable, Laravel friendly).
+    /// Text frames with JSON (default; human readable).
     JsonText,
     /// Binary frames with CBOR (future optimisation, `protocol::codec`).
     CborBinary,
@@ -510,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn laravel_welcome_parses_without_new_optional_fields() {
+    fn welcome_parses_without_new_optional_fields() {
         // Exactly what WelcomeMessage::toArray() produces.
         let raw = r#"{"type":"welcome","protocol_version":1,"player_id":"p-7",
                       "session_id":"s-1","match_id":"lan-20261017",
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn laravel_round_state_parses() {
+    fn round_state_parses() {
         let raw = r#"{"type":"round_state","phase":"countdown","round":"lan-20261017",
                       "round_number":1,"countdown_ms":3000}"#;
         let state = RoundState::from_wire(serde_json::from_str(raw).unwrap()).unwrap();
@@ -538,7 +538,7 @@ mod tests {
         let raw = r#"{"type":"round_state","phase":"running","round":"r","round_number":1,"countdown_ms":0}"#;
         let state = RoundState::from_wire(serde_json::from_str(raw).unwrap()).unwrap();
         assert_eq!(state.countdown_ms, None);
-        // Laravel omits round/round_number before a round exists.
+        // The server omits round/round_number before a round exists.
         let raw = r#"{"type":"round_state","phase":"lobby","countdown_ms":0}"#;
         let state = RoundState::from_wire(serde_json::from_str(raw).unwrap()).unwrap();
         assert_eq!(state.phase, Phase::Lobby);
@@ -546,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn laravel_lua_mode_snapshot_parses_with_markers() {
+    fn lua_mode_snapshot_parses_with_markers() {
         let raw = r#"{"type":"snapshot","tick":300,"acked_input_sequence":12,
                       "round":{"round_id":"r-1","time_left_ms":90000},
                       "players":[{"id":"p-1","name":"Alice","position":{"x":480,"y":270},
@@ -597,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn laravel_snapshot_parses() {
+    fn snapshot_parses() {
         let raw = r#"{"type":"snapshot","tick":180,"acked_input_sequence":177,
                       "round":{"round_id":"lan-20261017","time_left_ms":180000},
                       "players":[{"id":"p-1","name":"Alice","position":{"x":768.62,"y":630},
@@ -615,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn laravel_events_parse() {
+    fn events_parse() {
         let hit = r#"{"type":"event","event":"player_hit","attacker":"p-1","victim":"p-2",
                       "damage":12,"remaining_hp":88,"position":{"x":140,"y":92}}"#;
         let ProtocolMessage::Event(GameEvent::PlayerHit { remaining_hp, .. }) =
@@ -635,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn laravel_error_parses() {
+    fn error_parses() {
         let raw = r#"{"type":"error","code":"auth_failed","message":"Invalid token","fatal":true}"#;
         let ProtocolMessage::Error(error) = ProtocolMessage::from_json_str(raw).unwrap() else {
             panic!("expected error");
@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn pusher_envelope_is_unknown_not_an_error() {
-        // Laravel Reverb sends `pusher:connection_established` before the game
+        // The server sends `pusher:connection_established` before the game
         // protocol starts; it must never kill the session.
         let raw = r#"{"event":"pusher:connection_established","data":"{\"socket_id\":\"1.2\"}"}"#;
         let msg = ProtocolMessage::from_json_str(raw).unwrap();

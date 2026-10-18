@@ -173,7 +173,7 @@ impl ClientApp {
         self.connect_with(|net, hello| net.connect(hello));
     }
 
-    /// Connects to the in-memory mock server instead of Laravel.
+    /// Connects to the in-memory mock server instead of the real one.
     ///
     /// Used by `--mock-server` and integration tests to drive the complete
     /// network stack (session driver, handshake, snapshots, prediction)
@@ -262,7 +262,7 @@ impl ClientApp {
                 requested,
                 assigned,
                 "the server did not join the requested mode; playing deathmatch. \
-                 Check `php artisan game:mode:owner` / /api/v1/modes that the mode is live"
+                 Check `lanverse_game mode --list` / /api/v1/modes that the mode is live"
             );
             self.notifications
                 .push(format!("Mode '{requested}' not available – deathmatch"));

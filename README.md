@@ -1,35 +1,33 @@
 # LAN Bash Client
 
 Native Rust client for **LAN Bash**, a server-authoritative pixelart
-multiplayer game. The server is Laravel and communicates over WebSockets; the
-client renders the world, sends input intent and never decides gameplay
-outcomes itself.
+multiplayer game. The server is `LANVerseGame` (Rust) and speaks JSON over
+WebSockets; the client renders the world, sends input intent and never decides
+gameplay outcomes itself.
 
 ## Quick start
 
-The game server is started separately (Laravel project):
+The game server is started separately:
 
 ```bash
-cd ../LANVerseServer && php artisan game:serve --port=8080
+cd ../LANVerseGame && cargo run --release -- serve     # ws://127.0.0.1:8080/
 ```
 
-The client needs the **Reverb app key** in the URL (`/app/<key>`), because
-`game:serve` routes the game protocol behind it. The key is the server's
-`REVERB_APP_KEY` (`.env`) and is already the default, so a local server works
+The protocol lives on the **root path** of the game port, so the default works
 out of the box:
 
 ```bash
-# Default: ws://127.0.0.1:8080/app/<default key>
+# Default: ws://127.0.0.1:8080/
 cargo run -- --player-name Alice
 
-# Other host / explicit key (the key in the URL always wins)
+# Other host (a `host:port` shorthand is expanded; the legacy
+# `/app/<key>` suffix is still accepted by the server as an alias)
 cargo run -- --server 192.168.1.20:8080 --player-name Alice
-cargo run -- --server ws://192.168.1.20:8080/app/<reverb-key>
 
-# Authenticated play (Sanctum token from POST /api/v1/auth/login)
+# Authenticated play (token from POST /api/v1/auth/login)
 cargo run -- --server 192.168.1.20:8080 --token "1|…"
 
-# Joining an uploaded Lua mode (see LANVerseServer/docs/mode-packages.md)
+# Joining an uploaded Lua mode (see LANVerseGame/docs/mode-packages.md)
 cargo run -- --mode coin_rush --player-name Alice
 
 # Headless (no window) for CI / debugging – runs at real speed
@@ -50,8 +48,7 @@ cargo clippy --all-targets
 
 | environment variable | purpose                                |
 |----------------------|----------------------------------------|
-| `LAN_BASH_SERVER`    | server endpoint (`host:port`, `ws://host:port/app` or full URL) |
-| `LAN_BASH_REVERB_KEY` | Reverb app key appended to `host:port` / `/app` URLs |
+| `LAN_BASH_SERVER`    | server endpoint (`host:port` or a full `ws://`/`wss://` URL) |
 | `LAN_BASH_PLAYER_NAME` | display name                         |
 | `LAN_BASH_TOKEN`     | auth token forwarded in `hello`        |
 | `RUST_LOG`           | `tracing` filter, e.g. `lan_bash_client=debug` |
@@ -59,16 +56,14 @@ cargo clippy --all-targets
 ### When the server is not running yet
 
 The client is meant to be started first: it retries forever with a 2 s cap and
-connects as soon as `game:serve` comes up. The HUD shows the endpoint and the
+connects as soon as the server comes up. The HUD shows the endpoint and the
 concrete error instead of an empty world. (Startup failures used to fill the
 log with "input buffer full" – that is fixed; the buffer is only used while a
 session is established.)
 
-> **Server-side blocker (not a client bug).** The server's tick loop runs on
-> Reverb's event loop. A blocking call *on that loop* (e.g. a database query for
-> login) stalls every snapshot, and the client then trips its 8 s heartbeat and
-> reconnects. If you see "heartbeat timeout" while the server is up, look at the
-> server process, not here.
+> **If you see "heartbeat timeout" while the server is up**, look at the server
+> process, not here: its tick loop runs on its own thread and must keep sending
+> snapshots at 20 Hz.
 
 ## Controls
 
@@ -90,7 +85,7 @@ responsibility and exposes a documented public API:
 src/
 ├── core/           ids, Vec2 math, Tick, fixed-step clock
 ├── config/         CLI/env settings, defaults, reconnect policy
-├── protocol/       wire format shared with Laravel + validation
+├── protocol/       wire format shared with LANVerseGame + validation
 ├── models/         server-mirrored world state, GameState, visual state
 ├── net/            WebSocket transport, session driver, reconnect,
 │   ├── transport   WebSocket (tokio-tungstenite) / MessageTransport trait
@@ -116,12 +111,12 @@ Dependency rule: lower layers never import higher ones (`net` does not import
 raylib).
 
 See [`docs/protocol.md`](docs/protocol.md) for the complete client ↔ server
-contract (Laravel side implementation reference).
+contract (the server's canonical version is `LANVerseGame/docs/protocol.md`).
 
 ## Architecture in one picture
 
 ```text
-Laravel ──WebSocket(JSON)──► session driver (own thread + tokio runtime)
+LANVerseGame ──WebSocket(JSON)──► session driver (own thread + tokio runtime)
                                    │ NetEvents (channel)
                                    ▼
                      GameClient.update() ──► GameState (server truth)

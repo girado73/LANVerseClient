@@ -22,7 +22,7 @@ use crate::protocol::message::{ModeSummary, Phase, Welcome};
 ///
 /// The server owns the map; the client only needs the size for the camera and
 /// for drawing the border. Until the welcome carries real dimensions the
-/// Laravel defaults (`config/lanbash.php` → `gameplay.world`) are used.
+/// Server defaults (`world` 3200 x 1800) are used.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WorldBounds {
     pub width: f32,

@@ -7,7 +7,7 @@
 //!  │                                                                                 │
 //!  │  InputPipeline ──send──► NetClientHandle ──mpsc──► [net thread / tokio task]    │
 //!  │        ▲                       │                    Transport::connect()        │
-//!  │        │                       │                    ├─ WebSocketTransport ──► Laravel (Reverb/Echo)
+//!  │        │                       │                    ├─ WebSocketTransport ──► LANVerseGame
 //!  │        │                       │                    └─ MockTransport      (tests)
 //!  │  prediction ◄──GameEvent── GameClient ◄──mpsc── [net thread / tokio task]       │
 //!  │  visuals/UI    (drained)        │                                               │

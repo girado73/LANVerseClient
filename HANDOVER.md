@@ -75,8 +75,9 @@ und Nicht-Überschreiben.
 # LAN Bash Client — Handover / Working Notes
 
 > **Status: working against the real server.** Everything below was verified on
-> 2026-10-18 against `LANVerseServer` (`php artisan game:serve --port=8080`,
-> Reverb `sky7dm0tjxsre1lpqwjg`) unless marked **UNCERTAIN**.
+> 2026-10-18 against `LANVerseServer`; since the Rust migration the server is
+> `LANVerseGame` (`cargo run --release -- serve`, `ws://127.0.0.1:8080/`) and
+> the client defaults to that root URL.
 >
 > This file was originally a server-side handover. It has been rewritten for the
 > Rust client; the few server facts that matter for the client are in §9.
@@ -94,13 +95,13 @@ cargo test                      # 102 unit + 6 + 3 + 1 integration tests
 Manual smoke test against the real server:
 
 ```bash
-cd ../LANVerseServer && php artisan game:serve --port=8080 &
+cd ../LANVerseGame && cargo run --release -- serve &
 cargo run -- --headless --player-name RustClient --max-ticks 600
 # → handshake complete … phase Countdown → Running … 1 player … tick 600
 ```
 
 The client can also be started **before** the server: it retries every ≤ 2 s
-and connects once `game:serve` is up (verified live; regression test:
+and connects once the server is up (verified live; regression test:
 `tests/late_server.rs`).
 
 ---
@@ -147,25 +148,23 @@ Three further, independent causes, all fixed:
    once-per-streak flag, so it logged on every tick anyway. The streak now
    ends when an ack drains the buffer.
 
-> **Remaining, server-side:** the Laravel simulation acked at ~14 inputs/s in
-> our measurements (`ack 200` after 13 s) and rejects stale sequences, so long
-> headless runs can still overflow (= only a prediction-quality symptom, no
-> error). Not reproducible at the real 20 Hz snapshot rate.
+> **Server-side (historical):** the former server acked at ~14 inputs/s in our
+> measurements (`ack 200` after 13 s) and rejected stale sequences, so long
+> headless runs could overflow (= only a prediction-quality symptom, no error).
+> The Rust server accepts one input per connection and tick (60/s).
 
-### 2.3 Wrong default server URL ⇒ HTTP 403
-- The old default was `ws://127.0.0.1:8000/app/lan-bash/game`, which `game:serve`
-  answers with **403**: the game protocol lives behind `/app/<REVERB_APP_KEY>`.
-- New default: `ws://127.0.0.1:8080/app/sky7dm0tjxsre1lpqwjg`.
-- `--server` / `LAN_BASH_SERVER` accepts `host:port`, `ws://host:port/app`,
-  `http(s)://…` and full URLs; missing key path is appended
-  (`LAN_BASH_REVERB_KEY` overrides the built-in key).
+### 2.3 Wrong default server URL (historical HTTP 403)
+- The old default pointed at a path the server answered with **403**.
+- Current default: `ws://127.0.0.1:8080/` (root path).
+- `--server` / `LAN_BASH_SERVER` accepts `host:port`, `http(s)://…` and full
+  URLs; a legacy `/app/<key>` suffix is passed through (the server ignores it).
 
 ### 2.4 A single bad frame could kill the session
 - Parsing was strict; any unexpected field/shape produced a `TransportError`
   and wiped the HUD. Now `protocol::codec::parse_frame` decodes the `type`
   first: unknown types → `Unknown` (ignored), broken bodies → logged and
   skipped, Session continues.
-- Reverb's `pusher:connection_established` (no `type`) is ignored explicitly.
+- `pusher:connection_established` (no `type`) is ignored explicitly.
 
 ### 2.5 Status/welcome race, stale state after disconnect
 - `welcome` is now reported **before** the `Connected` status, so the game loop
@@ -176,7 +175,7 @@ Three further, independent causes, all fixed:
   socket cannot send inputs.
 
 ### 2.6 Round timer was always 0:00
-- Laravel sends `countdown_ms: 0` in every non-countdown `round_state`. The
+- The server sends `countdown_ms: 0` in every non-countdown `round_state`. The
   client used to write that into the round timer right after it came from the
   snapshot. Now `countdown_ms` only applies during `countdown`.
 - HUD format `{:.0}` dropped leading zeros (`1:5`); now `1:05`.
@@ -280,7 +279,7 @@ Client-side help (display-only, no authority change):
 - **edge markers** for remote players outside the camera
   (`render::scene::draw_offscreen_marker`), so nobody is "just gone".
 
-Spawn proximity is server policy (`config/lanbash.php` world size, spawn ring);
+Spawn proximity is server policy (world size, spawn ring in `LANVerseGame/src/sim`);
 if players should start close together, that has to change on the server.
 
 ### 2.13 Pre-existing test failure
@@ -317,7 +316,7 @@ Server-side input handling: `dash`, `jump`, `interact`(= attack) work;
 | `tests/rendering_motion.rs` | camera snaps instead of sweeping; drawn players move < 4 px/frame. |
 | `tests/late_server.rs` | exact reported scenario: client runs with no server for 500 ms → connects, gets `welcome`, player and round timer once the server starts. |
 | `tests/integration_net.rs` | mock-server end-to-end (handshake, acks, prediction, headless loop). |
-| `src/protocol/message.rs` (tests) | every Laravel payload parses verbatim; pusher frames are not errors. |
+| `src/protocol/message.rs` (tests) | every server payload parses verbatim; pusher frames are not errors. |
 | `src/protocol/validation.rs` (tests) | `world`/`move_speed` sanity. |
 | `src/net/client.rs` (tests) | round timer not clobbered, state reset on disconnect, toast once. |
 
@@ -346,7 +345,7 @@ src/net/client.rs          welcome ordering, session reset, ack mirroring,
 src/protocol/codec.rs      NEW lenient frame decoder
 src/protocol/message.rs    Welcome.world/move_speed, Snapshot.world, defaults
 src/protocol/validation.rs finite world/speed checks
-src/models/world.rs        Laravel defaults (team null, missing hp/facing)
+src/models/world.rs        server defaults (team null, missing hp/facing)
 src/models/game_state.rs   WorldBounds, move_speed, ack/overflow diagnostics
 src/input/buffer.rs        counted overflow, one log line per streak
 src/input/mod.rs           ensure_sequence_after(), clear_pending_actions()
@@ -406,25 +405,22 @@ README.md                  setup with app key, env vars, late-start behaviour
       multi-thread runtime on purpose (see §6.2); if it is ever rewritten for a
       current-thread runtime it must not block the test thread.
 
-## 8. Open items that are server-side (found while testing, not fixed here)
+## 8. Historical server-side items (as found while testing)
 
-- Simulation acked only ~14 inputs/s while the client sent 60/s (it applies
-  one movement step per acked input and drops stale ones), measured against
-  `game:serve` on 2026-10-18 (`ack 55` after ~3 s of `input`s).**UNCERTAIN**
-  whether that is a load artefact or a deliberate rate limit – check
-  `World::applyInput` / the tick/snapshot loop on the server side.
-- Tick loop runs on Reverb's event loop; a blocking call there stalls all
-  snapshots (client then trips the 8 s heartbeat and reconnects – correct
-  client behaviour).
+- The former simulation acked only ~14 inputs/s while the client sent 60/s
+  (measured 2026-10-18). The Rust server accepts one input per connection and
+  tick.
+- The former tick loop shared the socket process' event loop; a blocking call
+  there stalled all snapshots. The Rust server ticks on its own thread.
 
 ---
 
 ## 9. Server facts the client depends on
 
-- `php artisan game:serve --port=8080` starts Reverb **with the game router**;
-  `reverb:start` alone does not speak the game protocol.
-- Endpoint `ws://<host>:8080/app/<REVERB_APP_KEY>`.
-- Auth: Sanctum token in `hello.token`; profile name wins over `player_name`.
-  Guest play = no token.
+- `cd LANVerseGame && cargo run --release -- serve` starts the game server
+  (WebSocket + REST on :8080, admin on 127.0.0.1:8081).
+- Endpoint `ws://<host>:8080/` (a legacy `/app/<key>` suffix is accepted).
+- Auth: account token in `hello.token` (`lanverse_game token --email=…`);
+  profile name wins over `player_name`. Guest play = no token.
 - 60 Hz simulation, 20 Hz snapshots, 3 s countdown, 180 s rounds, respawn 2.5 s.
-- Default key `sky7dm0tjxsre1lpqwjg` (`.env` → `REVERB_APP_KEY`).
+- Mode packages live in `LANVerseGame/docs/mode-packages.md`.

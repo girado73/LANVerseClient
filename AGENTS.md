@@ -108,6 +108,6 @@ allerdings *in* einer Runtime erzeugt und gepollt werden.
 ### Protokoll
 
 `docs/protocol.md` ist die verbindliche Schnittstelle. Frames werden tolerant
-geparst (`protocol::codec`): unbekannte `type`s und Reverb-`pusher:*`-Frames
+geparst (`protocol::codec`): unbekannte `type`s und `pusher:*`-Frames (altes Transport-Protokoll)
 werden ignoriert, nie als Verbindungsfehler behandelt. `round_state.countdown_ms`
 ist nur während `countdown` gültig – der Server sendet außerhalb `0`.

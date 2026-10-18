@@ -1,10 +1,10 @@
-//! Wire protocol between the client and the Laravel game server.
+//! Wire protocol between the client and the game server.
 //!
 //! # Design
 //!
 //! * One envelope per WebSocket text frame, JSON encoded.
 //! * Every message is an internally tagged enum (`"type": "…"`), so the
-//!   Laravel side can simply `match ($json['type'])` and Rust gets a typed
+//!   server can dispatch on `type` and Rust gets a typed
 //!   enum via serde.
 //! * Unknown message types are **not** an error – [`ProtocolMessage::Unknown`]
 //!   absorbs them. That lets the server ship new messages without breaking

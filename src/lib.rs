@@ -1,7 +1,7 @@
 //! # LAN Bash Client
 //!
 //! Native Rust client for **LAN Bash**, a server-authoritative pixelart
-//! multiplayer game served by Laravel over WebSockets.
+//! multiplayer game served by LANVerseGame over WebSockets.
 //!
 //! ## Architecture
 //!
@@ -41,7 +41,7 @@
 //! |-----------------|-----------------------------------------------------------------|
 //! | `core`          | ids, math, ticks, fixed-step clock                               |
 //! | `config`        | CLI/env settings, defaults, reconnect policy                     |
-//! | `protocol`      | wire format shared with Laravel (JSON messages), validation      |
+//! | `protocol`      | wire format shared with the server (JSON messages), validation    |
 //! | `models`        | server-mirrored world state + purely local visual state          |
 //! | `net`           | WebSocket transport, session driver, reconnect, game facade      |
 //! | `input`         | input sampling, one-shot actions, replay buffer                  |

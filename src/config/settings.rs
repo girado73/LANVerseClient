@@ -10,7 +10,7 @@ pub struct ClientConfig {
     pub input: InputConfig,
     pub render: RenderConfig,
     pub player_name: String,
-    /// Optional bearer token handed to Laravel on the handshake (e.g. Laravel
+    /// Optional bearer token handed to the server on the handshake (e.g. a
     /// Sanctum token). The server decides what to do with it.
     pub auth_token: Option<String>,
     /// Uploaded Lua mode to join (`hello.match_id`), `None` = auto matchmaking.
@@ -47,11 +47,11 @@ impl NetConfig {
 
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
-    /// WebSocket endpoint of the Laravel game server.
+    /// WebSocket endpoint of the game server.
     ///
-    /// **The Reverb app key is required**: `game:serve` routes the game
-    /// protocol behind `/app/{key}`, so `ws://127.0.0.1:8080/app` is rejected
-    /// with HTTP 403 and `/app/<key>` is the only working endpoint.
+    /// The server (LANVerseGame) speaks the protocol on the root path of its
+    /// game port (`ws://127.0.0.1:8080/`). A `/app/<key>` suffix from the old
+    /// transport is still accepted (the server treats it as an alias).
     pub url: String,
     pub reconnect: ReconnectPolicy,
     /// Time without any server message before the client assumes the link is dead
@@ -63,7 +63,7 @@ pub struct ConnectionConfig {
     /// Time allowed between "socket open" and `welcome`.
     ///
     /// A server that accepts the upgrade but never answers `hello` (wrong
-    /// routing setup, Reverb without the game protocol) would otherwise look
+    /// routing setup, a server without the game protocol) would otherwise look
     /// like a connected client that just does not move.
     pub handshake_timeout: Duration,
 }
@@ -133,18 +133,13 @@ impl Default for NetConfig {
     }
 }
 
-/// Reverb app key of a default `php artisan game:serve` installation.
-///
-/// Override it with `--server`, `LAN_BASH_SERVER` or `LAN_BASH_REVERB_KEY`; the
-/// authoritative value lives in the server's `.env` (`REVERB_APP_KEY`).
-pub const DEFAULT_REVERB_APP_KEY: &str = "sky7dm0tjxsre1lpqwjg";
-/// Port `game:serve` listens on by default.
-pub const DEFAULT_REVERB_PORT: u16 = 8080;
+/// Port the game server listens on by default.
+pub const DEFAULT_GAME_PORT: u16 = 8080;
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
-            url: format!("ws://127.0.0.1:{DEFAULT_REVERB_PORT}/app/{DEFAULT_REVERB_APP_KEY}"),
+            url: format!("ws://127.0.0.1:{DEFAULT_GAME_PORT}/"),
             reconnect: ReconnectPolicy::default(),
             // 20 Hz snapshots + 2 s pings: 8 s means ~160 missed snapshots.
             heartbeat_timeout: Duration::from_secs(8),
@@ -249,11 +244,6 @@ impl ClientArgs {
     /// Merges CLI args on top of environment variables and defaults.
     pub fn into_config(self) -> ClientConfig {
         let mut config = ClientConfig::default();
-        let mut app_key = None;
-
-        if let Ok(key) = std::env::var("LAN_BASH_REVERB_KEY") {
-            app_key = Some(key);
-        }
         if let Ok(url) = std::env::var("LAN_BASH_SERVER") {
             config.net.connection.url = url;
         }
@@ -270,16 +260,20 @@ impl ClientArgs {
         }
 
         if let Some(url) = self.server_url {
-            config.net.connection.url = normalize_server_url(&url, app_key.as_deref());
+            config.net.connection.url = normalize_server_url(&url);
         } else {
-            config.net.connection.url =
-                normalize_server_url(&config.net.connection.url, app_key.as_deref());
+            config.net.connection.url = normalize_server_url(&config.net.connection.url);
         }
         if let Some(name) = self.player_name {
             config.player_name = name;
         }
         if let Some(token) = self.token {
             config.auth_token = Some(token);
+        }
+        // `--mode` travels in `hello.match_id`; without this the flag was
+        // parsed but never used, so the client always played Deathmatch.
+        if let Some(mode) = self.mode {
+            config.mode = Some(mode);
         }
         if self.guest {
             config.auth_token = None;
@@ -293,25 +287,19 @@ impl ClientArgs {
 /// Accepts the shorthand URLs people actually type and produces the endpoint
 /// the server expects.
 ///
-/// * `127.0.0.1:8080`               → `ws://127.0.0.1:8080/app/<key>`
-/// * `ws://127.0.0.1:8080/app`      → `ws://127.0.0.1:8080/app/<key>`
-/// * `http://lan.host:8080`         → `ws://lan.host:8080/app/<key>`
-/// * `ws://host:8080/app/<key>`     → unchanged
-/// * `wss://…`                      → unchanged
+/// * `127.0.0.1:8080`            → `ws://127.0.0.1:8080/`
+/// * `http://lan.host:8080`      → `ws://lan.host:8080/`
+/// * `ws://host:8080/app/<key>`  → unchanged (legacy alias)
+/// * `ws://host:8080/other`      → unchanged
+/// * `wss://…`                   → unchanged
 ///
-/// Registering without the key is the single most common misconfiguration:
-/// every request then fails with HTTP 403, which the client reports as a
-/// transport error before any game frame can arrive.
-pub fn normalize_server_url(raw: &str, app_key: Option<&str>) -> String {
+/// The `/app/<key>` form of the former transport is kept working because the
+/// server still accepts it as an alias; new deployments use the root path.
+pub fn normalize_server_url(raw: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
         return ConnectionConfig::default().url;
     }
-
-    let key = app_key
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .unwrap_or(DEFAULT_REVERB_APP_KEY);
 
     let with_scheme = if raw.contains("://") {
         raw.to_owned()
@@ -322,26 +310,7 @@ pub fn normalize_server_url(raw: &str, app_key: Option<&str>) -> String {
         .replacen("https://", "wss://", 1)
         .replacen("http://", "ws://", 1);
 
-    // `ws://host/…`: the path must end with `/app/<key>`.
-    match normalized.rfind("/app") {
-        Some(index) => {
-            let (base, path) = normalized.split_at(index);
-            let rest = path.trim_start_matches("/app").trim_end_matches('/');
-            // The key (if any) is the segment after `/app`.
-            let existing_key = rest
-                .strip_prefix('/')
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .filter(|segment| !segment.is_empty());
-            if let Some(existing_key) = existing_key {
-                format!("{base}/app/{existing_key}")
-            } else {
-                format!("{base}/app/{key}")
-            }
-        }
-        None => format!("{}/app/{key}", normalized.trim_end_matches('/')),
-    }
+    format!("{}/", normalized.trim_end_matches('/'))
 }
 
 fn require_value<I: Iterator<Item = String>>(iter: &mut I, flag: &str) -> anyhow::Result<String> {
@@ -367,23 +336,21 @@ USAGE:
     lan_bash_client [OPTIONS]
 
 OPTIONS:
-    -s, --server <URL>         Game server endpoint. `host:port`, `ws://host:port/app`
-                               or the full `ws://host:port/app/<reverb-key>`
-                               (default: {default_url})
+    -s, --server <URL>         Game server endpoint: `host:port`, `http://host:port`
+                               or a full `ws://`/`wss://` URL (default: {default_url})
     -n, --player-name <NAME>   Display name sent in the handshake
-        --token <TOKEN>        Auth token forwarded to Laravel
+        --token <TOKEN>        Auth token forwarded to the server
         --guest                Connect without token under a random guest name
         --mode <ID>            Join the uploaded Lua mode with this id
                                (`deathmatch` = built-in game, default)
         --headless             Run without a window (network/prediction only)
-        --mock-server          Use an in-memory demo server instead of Laravel
+        --mock-server          Use an in-memory demo server instead of the real one
         --max-ticks <N>        Headless: stop after N simulated ticks
         --max-frames <N>       GUI: stop after N rendered frames (smoke tests)
     -h, --help                 Show this help
 
 ENVIRONMENT:
-    LAN_BASH_SERVER       endpoint; a bare `host:port` gets `/app/<key>` appended
-    LAN_BASH_REVERB_KEY   Reverb app key from the server's .env (REVERB_APP_KEY)
+    LAN_BASH_SERVER       endpoint; a bare `host:port` becomes `ws://host:port/`
     LAN_BASH_PLAYER_NAME, LAN_BASH_TOKEN, LAN_BASH_MODE
     RUST_LOG              tracing filter (e.g. RUST_LOG=lan_bash_client=debug)",
         default_url = ConnectionConfig::default().url
@@ -408,6 +375,29 @@ mod tests {
 
         assert_eq!(args.server_url.as_deref(), Some("ws://example:9000/ws"));
         assert!(args.headless);
+    }
+
+    #[test]
+    fn the_mode_flag_reaches_the_config() {
+        let args = ClientArgs::parse([
+            "client".to_string(),
+            "--mode".to_string(),
+            "coin_rush".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(args.into_config().mode.as_deref(), Some("coin_rush"));
+    }
+
+    #[test]
+    fn deathmatch_mode_is_the_default_match() {
+        let args = ClientArgs::parse([
+            "client".to_string(),
+            "--mode".to_string(),
+            "deathmatch".to_string(),
+        ])
+        .unwrap();
+        assert!(args.into_config().mode.is_none());
     }
 
     #[test]
@@ -438,35 +428,33 @@ mod tests {
     }
 
     #[test]
-    fn default_url_targets_game_serve() {
-        let url = ConnectionConfig::default().url;
-        assert!(url.starts_with("ws://127.0.0.1:8080/app/"));
-        assert!(url.len() > "ws://127.0.0.1:8080/app/".len());
+    fn default_url_targets_the_game_server_root() {
+        assert_eq!(ConnectionConfig::default().url, "ws://127.0.0.1:8080/");
     }
 
     #[test]
     fn server_url_shorthand_is_expanded() {
-        let key = Some("abc123");
         assert_eq!(
-            normalize_server_url("127.0.0.1:8080", key),
-            "ws://127.0.0.1:8080/app/abc123"
+            normalize_server_url("127.0.0.1:8080"),
+            "ws://127.0.0.1:8080/"
         );
         assert_eq!(
-            normalize_server_url("ws://127.0.0.1:8080/app", key),
-            "ws://127.0.0.1:8080/app/abc123"
+            normalize_server_url("http://lan.local:8080/"),
+            "ws://lan.local:8080/"
+        );
+        // The server accepts `/app/<key>` as an alias; a trailing slash is
+        // normalised either way.
+        assert_eq!(
+            normalize_server_url("ws://host:8080/app/other"),
+            "ws://host:8080/app/other/"
         );
         assert_eq!(
-            normalize_server_url("http://lan.local:8080/", key),
-            "ws://lan.local:8080/app/abc123"
+            normalize_server_url("ws://host:8080/app/other/"),
+            "ws://host:8080/app/other/"
         );
         assert_eq!(
-            normalize_server_url("ws://host:8080/app/other", key),
-            "ws://host:8080/app/other",
-            "an explicit key wins over the configured one"
-        );
-        assert_eq!(
-            normalize_server_url("wss://play.example.com/app/", None),
-            format!("wss://play.example.com/app/{DEFAULT_REVERB_APP_KEY}")
+            normalize_server_url("wss://play.example.com"),
+            "wss://play.example.com/"
         );
     }
 }

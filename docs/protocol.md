@@ -1,14 +1,13 @@
 # LAN Bash – Client ↔ Server Protocol
 
-This document is the contract between the Rust client and the Laravel game
-server. Anything not described here must be treated as *not authoritative* by
-the client. It is verified against the Laravel implementation in
-`app/Realtime/Protocol/`.
+This document is the contract between the Rust client and the game server
+(`LANVerseGame`). Anything not described here must be treated as *not
+authoritative* by the client. The server-side canonical version, including the
+REST control plane, lives in `LANVerseGame/docs/protocol.md`.
 
 - **Transport:** WebSocket, one JSON object per text frame.
-- **Endpoint:** `ws://<host>:8080/app/<REVERB_APP_KEY>`.
-  `php artisan game:serve --port=8080` routes the game protocol behind the
-  Reverb app path; `/app` without the key fails with **HTTP 403**.
+- **Endpoint:** `ws://<host>:8080/` (root path). The former `/app/<key>` path is
+  still accepted by the server as an alias.
 - **Version:** `PROTOCOL_VERSION = 1` (`src/protocol/mod.rs`).
   A mismatched `welcome.protocol_version` fails the connection.
 - **Tagging:** every message has `"type"` (snake_case). Server → client
@@ -19,8 +18,9 @@ messages/events without breaking older clients.
 
 ### Tolerated non-game frames
 
-Reverb sends its own `pusher:connection_established` event on every socket
-before the game protocol starts:
+The server sends a `pusher:connection_established` event on every socket before
+the game protocol starts (kept for clients of the former transport; it carries
+no game state):
 
 ```json
 { "event": "pusher:connection_established", "data": "{\"socket_id\":\"1.2\"}" }
@@ -32,8 +32,8 @@ kill the session and never reach the game state.
 ## Connection sequence
 
 ```text
-client                                          server (Laravel)
-   │  WS upgrade  /app/<key>                        │
+client                                          server
+   │  WS upgrade  /                                │
    │ ─────────────────────────────────────────────► │
    │  {"event":"pusher:connection_established"}     │  (ignored by the client)
    │ ◄───────────────────────────────────────────── │
@@ -142,7 +142,7 @@ above the last acknowledged sequence, otherwise every input is discarded.
 `tick_rate` must be within `1..=240`; the client rejects the connection
 otherwise. `world` (`{width, height}`) and `move_speed` are accepted if a future
 server adds them; today they are absent and the client falls back to the
-server defaults from `config/lanbash.php` (world 3200×1800, speed 220).
+server defaults (world 3200×1800, speed 220).
 
 ### `snapshot` (authoritative world state)
 
