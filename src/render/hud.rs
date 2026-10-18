@@ -130,9 +130,61 @@ impl HudRenderer {
             );
         }
 
+        // --- minimap ------------------------------------------------------
+        Self::draw_minimap(d, state, config);
+
         // --- debug overlay ------------------------------------------------
         if config.show_debug_overlay {
             Self::draw_debug(d, state, config, pending_inputs, fps);
+        }
+    }
+
+    /// Small overview of the whole server-provided map.
+    ///
+    /// Display-only. The camera shows 480×270 of a 3200×1800 world, i.e. ~2 % of
+    /// the area, so without this the other players are effectively invisible.
+    fn draw_minimap(d: &mut impl RaylibDraw, state: &GameState, config: &RenderConfig) {
+        let world = state.world;
+        let max_width = 96;
+        let max_height = 54;
+        let scale = (max_width as f32 / world.width)
+            .min(max_height as f32 / world.height)
+            .max(0.001);
+        let width = (world.width * scale).round().max(8.0) as i32;
+        let height = (world.height * scale).round().max(8.0) as i32;
+        let x = config.internal_width - PADDING - width;
+        // Above the round timer (bottom-right).
+        let y = config.internal_height - PADDING - FONT_SIZE * 2 - height - 2;
+
+        d.draw_rectangle(
+            x - 1,
+            y - 1,
+            width + 2,
+            height + 2,
+            Color::new(10, 10, 14, 200),
+        );
+        d.draw_rectangle_lines(
+            x - 1,
+            y - 1,
+            width + 2,
+            height + 2,
+            Color::new(90, 200, 160, 180),
+        );
+
+        for player in state.players.values() {
+            if !player.is_alive {
+                continue;
+            }
+            let px = x + (player.position.x * scale).round() as i32;
+            let py = y + (player.position.y * scale).round() as i32;
+            let local = state.is_local(&player.id);
+            let color = if local {
+                Color::new(250, 240, 140, 255)
+            } else {
+                Color::new(230, 230, 240, 230)
+            };
+            let size = if local { 3 } else { 2 };
+            d.draw_rectangle(px, py, size, size, color);
         }
     }
 

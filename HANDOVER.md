@@ -187,7 +187,29 @@ no phase/transport errors.
 > players). `LAN_BASH_TRACE_LUMA=1` reads the render texture instead and is the
 > reliable way to tell "content changed" from "presentation is wrong".
 
-### 2.12 Pre-existing test failure
+### 2.12 "Bob and Alice don't see each other"
+
+Not a networking bug. Both clients receive each other (verified: each snapshot
+contains both players, `player_joined` fires, the scoreboard lists both). They
+are simply **out of view**:
+
+- world: **3200×1800**, camera viewport: **480×270** → ~2 % of the map visible
+- spawn ring: 30 % of the world radius around the centre
+  (`World::spawnPointFor`, deterministic per player id), so two players can
+  start up to ~1900 units apart
+- measured with two real clients: Alice `(2080, 432)`, Bob `(666, 599)` →
+  **1414 units apart ≈ 3 screen widths**
+
+Client-side help (display-only, no authority change):
+- **minimap** in the HUD (bottom-right) showing the whole map and every alive
+  player (local player highlighted),
+- **edge markers** for remote players outside the camera
+  (`render::scene::draw_offscreen_marker`), so nobody is "just gone".
+
+Spawn proximity is server policy (`config/lanbash.php` world size, spawn ring);
+if players should start close together, that has to change on the server.
+
+### 2.13 Pre-existing test failure
 `headless_loop_keeps_an_explicit_mock_connection` failed on the untouched
 baseline. Root cause: plain `cargo test` provides no Tokio runtime, so the
 mock connection future was never polled ("connected", but zero snapshots).

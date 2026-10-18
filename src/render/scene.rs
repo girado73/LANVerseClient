@@ -99,8 +99,14 @@ fn draw_one(
     else {
         return;
     };
-    // Cull players outside the viewport (common in big LAN matches).
+    // Cull players outside the viewport (common in big LAN matches) but leave
+    // a marker at the screen edge: the world is 3200×1800 while the camera
+    // shows 480×270, so without it teammates are simply "gone" – they spawn up
+    // to two screens apart.
     if !camera.is_visible(camera.screen_to_world(screen), sprites::PLAYER_HEIGHT * 2.0) {
+        if !state.is_local(&player.id) && player.is_alive {
+            draw_offscreen_marker(d, screen, camera, player);
+        }
         return;
     }
 
@@ -140,6 +146,31 @@ fn draw_one(
             Color::new(250, 90, 90, 230),
         );
     }
+}
+
+/// Small arrow-ish marker at the viewport edge for a remote player that is
+/// outside the camera. Purely informational (no gameplay effect).
+fn draw_offscreen_marker(
+    d: &mut impl RaylibDraw,
+    screen: Vec2,
+    camera: &Camera,
+    player: &crate::models::world::PlayerState,
+) {
+    let viewport = Vec2::new(
+        camera.viewport.x * camera.zoom,
+        camera.viewport.y * camera.zoom,
+    );
+    let margin = 5.0;
+    let point = Vec2::new(
+        screen.x.clamp(margin, viewport.x - margin),
+        screen.y.clamp(margin, viewport.y - margin),
+    );
+    let color = sprites::player_color(&player.id);
+    let x = point.x.round() as i32;
+    let y = point.y.round() as i32;
+    // 3×3 body with a 1 px outline so it stays visible on the dark floor.
+    d.draw_rectangle(x - 1, y - 1, 5, 5, Color::new(20, 18, 28, 220));
+    d.draw_rectangle(x, y, 3, 3, color);
 }
 
 fn draw_grid(d: &mut impl RaylibDraw, top_left: Vec2, camera: &Camera) {
