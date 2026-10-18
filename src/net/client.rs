@@ -76,6 +76,8 @@ pub struct GameClient {
     /// instead. Only the newest matters for reconciliation: authority is always
     /// the latest server state.
     latest_snapshot: Option<Snapshot>,
+    /// Mode packages received this session and not yet persisted by the app.
+    received_modes: Vec<crate::protocol::message::ModePackage>,
     /// Runtime under which connection futures are *polled*.
     ///
     /// `None` uses the caller's ambient runtime (tests, embedding). Without one
@@ -98,6 +100,7 @@ impl GameClient {
             hello: None,
             handshake_complete: false,
             latest_snapshot: None,
+            received_modes: Vec::new(),
             runtime: None,
         }
     }
@@ -195,6 +198,11 @@ impl GameClient {
         self.status.can_send_gameplay() && self.handshake_complete
     }
 
+    /// Mode packages received since the last call (the app persists them).
+    pub fn take_mode_packages(&mut self) -> Vec<crate::protocol::message::ModePackage> {
+        std::mem::take(&mut self.received_modes)
+    }
+
     /// Returns the newest snapshot applied since the last call.
     ///
     /// The game loop feeds it to `Predictor::on_snapshot`, which is what prunes
@@ -212,6 +220,17 @@ impl GameClient {
         }
         match &self.handle {
             Some(handle) => handle.send_input(message).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Sends one non-gameplay protocol message (currently `pull`).
+    pub fn send_message(&self, message: crate::protocol::message::ProtocolMessage) -> bool {
+        if !self.is_connected() {
+            return false;
+        }
+        match &self.handle {
+            Some(handle) => handle.send_raw(message).is_ok(),
             None => false,
         }
     }
@@ -272,6 +291,13 @@ impl GameClient {
                     }
                 }
                 NetEvent::Welcome(welcome) => self.apply_welcome(state, welcome),
+                NetEvent::Mode(payload) => match payload.mode {
+                    Some(package) => {
+                        tracing::info!(mode = %package.id, bytes = package.script.len(), "mode payload received");
+                        self.received_modes.push(package);
+                    }
+                    None => tracing::info!("match runs the built-in game (no mode package)"),
+                },
                 NetEvent::Snapshot(snapshot) => self.apply_snapshot(state, snapshot),
                 NetEvent::Game(event) => {
                     self.apply_game_event(state, event, &mut tick);
@@ -309,6 +335,7 @@ impl GameClient {
 
         state.local_player = Some(welcome.player_id.clone());
         state.match_id = welcome.match_id.clone();
+        state.mode = welcome.mode.clone();
         state.tick_rate = welcome.tick_rate;
         state.server_tick = Tick(welcome.server_tick);
         state.last_error = None;
@@ -351,6 +378,9 @@ impl GameClient {
         for player in &snapshot.players {
             state.players.insert(player.id.clone(), player.clone());
         }
+        // Markers belong to the mode script; the newest snapshot is the whole
+        // truth, exactly like the player list.
+        state.markers.clone_from(&snapshot.markers);
         if let Some(world) = snapshot.world {
             state.world = crate::models::WorldBounds::from_dimensions(world.width, world.height);
         }
@@ -408,6 +438,17 @@ impl GameClient {
                 team,
             } => {
                 tracing::debug!(%player_id, score, ?team, "score changed");
+            }
+            GameEvent::ModeLog { level, message, .. } => {
+                state.push_mode_log(level.clone(), message.clone());
+                tracing::debug!(level = %level, %message, "mode script log");
+            }
+            GameEvent::ModeError { mode_id, message } => {
+                tracing::error!(%mode_id, %message, "mode script failed");
+                state.mode_error = Some(message.clone());
+                state.push_mode_log("error", message.clone());
+                tick.notifications
+                    .push(format!("Mode script error: {message}"));
             }
             GameEvent::Unknown => {
                 tracing::debug!("ignoring unknown game event");
@@ -520,6 +561,7 @@ mod tests {
             message: None,
             world: None,
             move_speed: None,
+            mode: None,
         }
     }
 
@@ -570,6 +612,89 @@ mod tests {
         // Still the newer snapshot's player.
         assert!(state.players.contains_key(&PlayerId::from("a")));
         assert_eq!(state.server_tick, Tick(30));
+    }
+
+    #[test]
+    fn snapshots_carry_markers_of_the_running_mode() {
+        let mut client = connected_client();
+        let mut state = crate::models::GameState::new();
+        let snapshot = Snapshot {
+            tick: 5,
+            players: vec![default_player("a")],
+            markers: vec![crate::models::world::MarkerState {
+                id: 3,
+                x: 10.0,
+                y: 20.0,
+                label: "+1".to_owned(),
+                kind: "coin".to_owned(),
+            }],
+            ..Default::default()
+        };
+        client.apply_snapshot(&mut state, snapshot);
+        assert_eq!(state.markers.len(), 1);
+        assert_eq!(state.markers[0].kind, "coin");
+
+        // A newer snapshot without markers clears them (newest state wins).
+        client.apply_snapshot(
+            &mut state,
+            Snapshot {
+                tick: 6,
+                players: vec![default_player("a")],
+                ..Default::default()
+            },
+        );
+        assert!(state.markers.is_empty());
+    }
+
+    #[test]
+    fn invalid_markers_drop_the_whole_snapshot() {
+        let mut client = connected_client();
+        let mut state = crate::models::GameState::new();
+        let snapshot = Snapshot {
+            tick: 5,
+            players: vec![default_player("a")],
+            markers: vec![crate::models::world::MarkerState {
+                id: 1,
+                x: f32::NAN,
+                y: 0.0,
+                label: String::new(),
+                kind: "coin".to_owned(),
+            }],
+            ..Default::default()
+        };
+        client.apply_snapshot(&mut state, snapshot);
+        assert!(state.markers.is_empty());
+        assert_eq!(state.server_tick, Tick::ZERO);
+    }
+
+    #[test]
+    fn mode_events_fill_the_console_and_the_error() {
+        let mut client = connected_client();
+        let mut state = crate::models::GameState::new();
+        let mut tick = NetworkTick::default();
+
+        client.apply_game_event(
+            &mut state,
+            GameEvent::ModeLog {
+                mode_id: "coin_rush".to_owned(),
+                level: "log".to_owned(),
+                message: "Coin collected (1/10)".to_owned(),
+            },
+            &mut tick,
+        );
+        assert_eq!(state.mode_log.len(), 1);
+        assert!(state.mode_error.is_none());
+
+        client.apply_game_event(
+            &mut state,
+            GameEvent::ModeError {
+                mode_id: "coin_rush".to_owned(),
+                message: "boom".to_owned(),
+            },
+            &mut tick,
+        );
+        assert_eq!(state.mode_error.as_deref(), Some("boom"));
+        assert!(!tick.notifications.is_empty());
     }
 
     #[test]

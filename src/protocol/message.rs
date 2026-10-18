@@ -27,12 +27,16 @@ pub enum ProtocolMessage {
     Input(InputMessage),
     /// Latency probe; answered by [`ProtocolMessage::Pong`].
     Ping(Ping),
+    /// Asks the server for the current match's Lua package (offline copy).
+    Pull(Pull),
 
     // ---- server -> client ----
     /// Handshake accepted.
     Welcome(Welcome),
     /// Authoritative world state.
     Snapshot(Snapshot),
+    /// Mode package download, answering [`ProtocolMessage::Pull`].
+    Mode(ModePayload),
     /// Discrete gameplay event.
     Event(GameEvent),
     /// Match lifecycle transition.
@@ -56,6 +60,8 @@ impl ProtocolMessage {
             Self::Hello(_) => "hello",
             Self::Input(_) => "input",
             Self::Ping(_) => "ping",
+            Self::Pull(_) => "pull",
+            Self::Mode(_) => "mode",
             Self::Welcome(_) => "welcome",
             Self::Snapshot(_) => "snapshot",
             Self::Event(_) => "event",
@@ -113,6 +119,56 @@ impl Hello {
             client_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         }
     }
+
+    /// Joins a specific match. Uploaded Lua modes are matches named after the
+    /// mode id (`coin_rush`); `None` keeps the server's auto matchmaking.
+    pub fn with_match(mut self, match_id: Option<String>) -> Self {
+        self.match_id = match_id.map(crate::core::MatchId::from);
+        self
+    }
+}
+
+/// Asks for the current match's mode package.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Pull {
+    /// Always "mode": more pull targets can be added without breaking clients.
+    #[serde(default = "default_pull_target")]
+    pub what: String,
+}
+
+fn default_pull_target() -> String {
+    "mode".to_owned()
+}
+
+impl Pull {
+    pub fn mode() -> Self {
+        Self {
+            what: default_pull_target(),
+        }
+    }
+}
+
+/// Mode package sent by the server (`type: "mode"`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModePayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ModePackage>,
+}
+
+/// The builder's `mode.json` plus its Lua source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModePackage {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// The builder manifest. Stored verbatim; the client does not interpret it
+    /// (the server is authoritative for world size and rules).
+    #[serde(default)]
+    pub manifest: serde_json::Value,
+    #[serde(default)]
+    pub script: String,
+    #[serde(default)]
+    pub checksum: String,
 }
 
 /// The AGENTS.md input example:
@@ -167,6 +223,22 @@ pub struct Welcome {
     /// *visual* prediction. The server does not send it yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub move_speed: Option<f32>,
+    /// Lua mode package currently played by the match, if any.
+    ///
+    /// Only the checksum and id: the full package is fetched through the REST
+    /// API on demand, so normal play never depends on the script download.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ModeSummary>,
+}
+
+/// Which Lua mode a match runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModeSummary {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub checksum: String,
 }
 
 /// One authoritative world state at a given tick.
@@ -188,6 +260,12 @@ pub struct Snapshot {
     /// Authoritative world size, if the server chose to include it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub world: Option<WorldState>,
+    /// Markers placed by a Lua mode script. Absent for the built-in game.
+    ///
+    /// Players may edit their local copy (they are plain Lua tables on the
+    /// server), so every field is validated before it is trusted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<crate::models::world::MarkerState>,
 }
 
 /// Immutable world metadata mirrored from the server.
@@ -240,6 +318,22 @@ pub enum GameEvent {
         score: i32,
         #[serde(default)]
         team: Option<String>,
+    },
+    /// Lua script console output (`lb.log`, `print`, `lb.warn`).
+    ModeLog {
+        #[serde(default)]
+        mode_id: String,
+        #[serde(default)]
+        level: String,
+        #[serde(default)]
+        message: String,
+    },
+    /// A mode script failed; the match fell back to Deathmatch rules.
+    ModeError {
+        #[serde(default)]
+        mode_id: String,
+        #[serde(default)]
+        message: String,
     },
     /// Unknown future event – absorbed for forward compatibility.
     #[serde(other)]
@@ -449,6 +543,57 @@ mod tests {
         let state = RoundState::from_wire(serde_json::from_str(raw).unwrap()).unwrap();
         assert_eq!(state.phase, Phase::Lobby);
         assert_eq!(state.round_number, None);
+    }
+
+    #[test]
+    fn laravel_lua_mode_snapshot_parses_with_markers() {
+        let raw = r#"{"type":"snapshot","tick":300,"acked_input_sequence":12,
+                      "round":{"round_id":"r-1","time_left_ms":90000},
+                      "players":[{"id":"p-1","name":"Alice","position":{"x":480,"y":270},
+                      "velocity":{"x":0,"y":0},"facing":{"x":1,"y":0},"hp":100,"max_hp":100,
+                      "is_alive":true,"score":3,"team":null}],
+                      "markers":[{"id":7,"x":100.5,"y":200,"label":"+1","kind":"coin"}]}"#;
+        let ProtocolMessage::Snapshot(snap) = ProtocolMessage::from_json_str(raw).unwrap() else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(snap.markers.len(), 1);
+        assert_eq!(snap.markers[0].id, 7);
+        assert_eq!(snap.markers[0].kind, "coin");
+        assert!(snap.validate().is_ok());
+    }
+
+    #[test]
+    fn a_deathmatch_snapshot_has_no_markers() {
+        let raw = r#"{"type":"snapshot","tick":1,"players":[]}"#;
+        let ProtocolMessage::Snapshot(snap) = ProtocolMessage::from_json_str(raw).unwrap() else {
+            panic!("expected snapshot");
+        };
+        assert!(snap.markers.is_empty());
+    }
+
+    #[test]
+    fn lua_mode_welcome_and_pull_frames_parse() {
+        let raw = r#"{"type":"welcome","protocol_version":1,"player_id":"p-1","tick_rate":60,
+                      "server_tick":0,"match_id":"coin_rush",
+                      "mode":{"id":"coin_rush","name":"Coin Rush","checksum":"abc"}}"#;
+        let ProtocolMessage::Welcome(welcome) = ProtocolMessage::from_json_str(raw).unwrap() else {
+            panic!("expected welcome");
+        };
+        let mode = welcome.mode.expect("mode summary");
+        assert_eq!(mode.id, "coin_rush");
+
+        let pull = ProtocolMessage::Pull(Pull::mode())
+            .to_json_string()
+            .unwrap();
+        assert_eq!(pull, r#"{"type":"pull","what":"mode"}"#);
+
+        let raw = r#"{"type":"mode","mode":{"id":"coin_rush","name":"Coin Rush",
+                      "manifest":{"id":"coin_rush"},"script":"function on_start() end",
+                      "checksum":"abc"}}"#;
+        let ProtocolMessage::Mode(payload) = ProtocolMessage::from_json_str(raw).unwrap() else {
+            panic!("expected mode payload");
+        };
+        assert_eq!(payload.mode.unwrap().script, "function on_start() end");
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use crate::net::connection::ConnectionStatus;
 use crate::net::latency::LatencyEstimator;
 use crate::protocol::message::{
-    GameEvent, ProtocolMessage, RoundState, ServerError, Snapshot, Welcome,
+    GameEvent, ModePayload, ProtocolMessage, RoundState, ServerError, Snapshot, Welcome,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +21,8 @@ pub enum NetEvent {
     Snapshot(Snapshot),
     /// One discrete gameplay event from the server.
     Game(GameEvent),
+    /// Mode package sent by the server (`type: "mode"`).
+    Mode(ModePayload),
     /// Match phase transition.
     RoundState(RoundState),
     /// Measured RTT in milliseconds.
@@ -41,6 +43,7 @@ pub fn classify(message: ProtocolMessage, latency: &mut LatencyEstimator) -> Vec
         ProtocolMessage::Snapshot(snapshot) => vec![NetEvent::Snapshot(snapshot)],
         ProtocolMessage::Event(event) => vec![NetEvent::Game(event)],
         ProtocolMessage::RoundState(state) => vec![NetEvent::RoundState(state)],
+        ProtocolMessage::Mode(payload) => vec![NetEvent::Mode(payload)],
         ProtocolMessage::Pong(pong) => latency
             .on_pong(pong.client_time_ms)
             .map(|rtt| vec![NetEvent::Latency(rtt)])

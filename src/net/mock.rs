@@ -186,6 +186,7 @@ async fn mock_server(
                             tick_rate: config.tick_rate,
                             server_tick: tick,
                             message: Some(format!("Welcome, {}", config.player_name)),
+                            mode: None,
                             // Same world and speed as a default Laravel server.
                             world: Some(crate::protocol::message::WorldState {
                                 width: 3200.0,
@@ -277,6 +278,7 @@ async fn mock_server(
                     round: None,
                     server_time_ms: None,
                     world: None,
+                    markers: Vec::new(),
                 });
                 if send(&inbound, &snapshot).is_err() {
                     break;

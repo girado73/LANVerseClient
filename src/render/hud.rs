@@ -130,6 +130,9 @@ impl HudRenderer {
             );
         }
 
+        // --- Lua mode: name + script console ------------------------------
+        Self::draw_mode_panel(d, state, config);
+
         // --- minimap ------------------------------------------------------
         Self::draw_minimap(d, state, config);
 
@@ -171,6 +174,13 @@ impl HudRenderer {
             Color::new(90, 200, 160, 180),
         );
 
+        // Mode markers first so players stay visible on top.
+        for marker in &state.markers {
+            let mx = x + (marker.x * scale).round() as i32;
+            let my = y + (marker.y * scale).round() as i32;
+            d.draw_rectangle(mx, my, 1, 1, Color::new(255, 196, 61, 220));
+        }
+
         for player in state.players.values() {
             if !player.is_alive {
                 continue;
@@ -185,6 +195,65 @@ impl HudRenderer {
             };
             let size = if local { 3 } else { 2 };
             d.draw_rectangle(px, py, size, size, color);
+        }
+    }
+
+    /// Lua mode title, the script's console lines and a script failure banner.
+    ///
+    /// Positioned top-centre: it is informational only and never blocks input.
+    fn draw_mode_panel(d: &mut impl RaylibDraw, state: &GameState, config: &RenderConfig) {
+        let Some(mode) = &state.mode else {
+            // No package announced, but the server may still relay log lines.
+            if state.mode_log.is_empty() && state.mode_error.is_none() {
+                return;
+            }
+            let mut y = PADDING + FONT_SIZE * 2 + 6;
+            for line in &state.mode_log {
+                let text = truncate(&line.message, 52);
+                d.draw_text(
+                    &text,
+                    (config.internal_width - measure_text(&text, FONT_SIZE)) / 2,
+                    y,
+                    FONT_SIZE,
+                    mode_log_color(&line.level),
+                );
+                y += FONT_SIZE + 1;
+            }
+            return;
+        };
+
+        let title = format!("MODE  {}", mode.name);
+        let width = measure_text(&title, FONT_SIZE);
+        d.draw_text(
+            &title,
+            (config.internal_width - width) / 2,
+            PADDING + FONT_SIZE + 3,
+            FONT_SIZE,
+            Color::new(120, 220, 240, 255),
+        );
+
+        let mut y = PADDING + FONT_SIZE * 2 + 8;
+        for line in &state.mode_log {
+            let text = truncate(&line.message, 52);
+            d.draw_text(
+                &text,
+                (config.internal_width - measure_text(&text, FONT_SIZE)) / 2,
+                y,
+                FONT_SIZE,
+                mode_log_color(&line.level),
+            );
+            y += FONT_SIZE + 1;
+        }
+
+        if let Some(error) = &state.mode_error {
+            let text = truncate(&format!("MODE ERROR: {error}"), 64);
+            d.draw_text(
+                &text,
+                (config.internal_width - measure_text(&text, FONT_SIZE)) / 2,
+                config.internal_height / 2 - FONT_SIZE - 2,
+                FONT_SIZE,
+                Color::new(250, 120, 120, 255),
+            );
         }
     }
 
@@ -266,6 +335,14 @@ impl HudRenderer {
                 Color::new(170, 220, 255, 200),
             );
         }
+    }
+}
+
+fn mode_log_color(level: &str) -> Color {
+    match level {
+        "error" => Color::new(250, 120, 120, 255),
+        "warn" => Color::new(246, 193, 119, 255),
+        _ => Color::new(190, 235, 235, 255),
     }
 }
 

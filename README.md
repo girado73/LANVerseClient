@@ -29,6 +29,9 @@ cargo run -- --server ws://192.168.1.20:8080/app/<reverb-key>
 # Authenticated play (Sanctum token from POST /api/v1/auth/login)
 cargo run -- --server 192.168.1.20:8080 --token "1|…"
 
+# Joining an uploaded Lua mode (see LANVerseServer/docs/mode-packages.md)
+cargo run -- --mode coin_rush --player-name Alice
+
 # Headless (no window) for CI / debugging – runs at real speed
 cargo run -- --headless --max-ticks 600
 

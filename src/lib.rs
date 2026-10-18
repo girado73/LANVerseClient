@@ -80,6 +80,7 @@ pub mod core;
 pub mod effects;
 pub mod input;
 pub mod interpolation;
+pub mod mode_cache;
 pub mod models;
 pub mod net;
 pub mod platform;

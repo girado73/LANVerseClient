@@ -55,6 +55,21 @@ impl Default for MovementModel {
 }
 
 impl MovementModel {
+    /// Prediction speed announced by the server via `welcome.move_speed`.
+    ///
+    /// Lua modes may move players faster or slower (the manifest sets
+    /// `player.move_speed`); without this the local sprite rubber-bands against
+    /// the authoritative position.
+    pub fn with_speed(speed: Option<f32>) -> Self {
+        match speed {
+            Some(speed) if speed.is_finite() && speed > 0.0 => Self {
+                speed,
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
+
     /// Displacement for one tick of `input.movement`.
     pub fn displacement(&self, movement: Vec2, tick_rate: u32) -> Vec2 {
         movement * (self.speed / tick_rate.max(1) as f32)

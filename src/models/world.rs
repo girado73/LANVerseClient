@@ -96,6 +96,22 @@ impl PlayerState {
     }
 }
 
+/// A marker placed by a Lua mode script (coin, zone, goal …).
+///
+/// Purely decorative on the client: the script decides what a marker means and
+/// only the server may create, move or remove it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarkerState {
+    pub id: u64,
+    pub x: f32,
+    pub y: f32,
+    #[serde(default)]
+    pub label: String,
+    /// Free-form kind ("coin", "goal", …) used to pick a colour.
+    #[serde(default)]
+    pub kind: String,
+}
+
 /// Round/match information mirrored from `RoundState` snapshots.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RoundInfo {

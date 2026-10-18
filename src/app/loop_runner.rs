@@ -99,6 +99,13 @@ pub struct ClientApp {
     /// the interpolator needs the server's timeline, not ours. `None` until the
     /// first snapshot arrived in this session.
     tick_offset: Option<i64>,
+    /// Mode requested with `--mode` (echoed by the server in `welcome.match_id`).
+    configured_mode: Option<String>,
+    /// Set once the mode package of the current match was requested.
+    ///
+    /// Downloading it is optional: the client stores it next to its own modes
+    /// but never executes it.
+    mode_pulled: bool,
     /// Runtime that polls the network connection.
     ///
     /// The game thread usually has no Tokio reactor, and `run_headless` blocks
@@ -110,6 +117,8 @@ pub struct ClientApp {
 
 impl ClientApp {
     pub fn new(config: ClientConfig) -> Self {
+        let prediction_speed = config.net.world_move_speed;
+        let config_mode = config.mode.clone();
         let tick_rate = TickRate::default();
         let mut clock = FixedClock::new(tick_rate.hz(), Tick::ZERO);
         // Align `clock.current_tick` with input sampling.
@@ -131,7 +140,7 @@ impl ClientApp {
             state: GameState::new(),
             net,
             input_buffer,
-            predictor: Predictor::new(MovementModel::default()),
+            predictor: Predictor::new(MovementModel::with_speed(prediction_speed)),
             clock,
             camera,
             mixer: Mixer::default(),
@@ -141,6 +150,8 @@ impl ClientApp {
             local_was_alive: false,
             camera_placed: false,
             tick_offset: None,
+            configured_mode: config_mode,
+            mode_pulled: false,
             runtime: None,
         }
     }
@@ -197,7 +208,8 @@ impl ClientApp {
         let hello = Hello::new(
             self.config.player_name.clone(),
             self.config.auth_token.clone(),
-        );
+        )
+        .with_match(self.config.mode.clone());
         // The runtime lives on this (the game) thread, so it must also be the
         // context the connection factory is created in.
         let result = match &self.runtime {
@@ -208,6 +220,74 @@ impl ClientApp {
             None => connect(&mut self.net, hello),
         };
         self.report_connect(result);
+        self.mode_pulled = false;
+    }
+
+    /// Saves the package once, and only once the server answered with it.
+    ///
+    /// `net::client` stores the payload in memory; writing it here keeps file
+    /// I/O out of the frame path that runs while the payload arrives.
+    fn write_discovered_modes(&mut self) {
+        for package in self.net.take_mode_packages() {
+            match crate::mode_cache::store(&package) {
+                Ok(dir) => {
+                    tracing::info!(mode = %package.id, path = %dir.display(), bytes = package.script.len(), "mode package saved");
+                    self.notifications.push(format!(
+                        "Mode '{}' downloaded → {}",
+                        package.id,
+                        dir.display()
+                    ));
+                }
+                Err(err) => {
+                    tracing::warn!(%err, mode = %package.id, "could not save the mode package");
+                    self.notifications
+                        .push(format!("Mode download failed: {err}"));
+                }
+            }
+        }
+    }
+
+    /// Warns when `--mode` was requested but the server assigned another kind
+    /// of match (unknown id, draft, or the server did not read the field).
+    fn check_requested_mode(&mut self) {
+        let (Some(requested), Some(assigned)) =
+            (self.config.mode.as_deref(), self.state.match_id.as_ref())
+        else {
+            return;
+        };
+        let assigned = assigned.as_str();
+
+        if requested != assigned {
+            tracing::warn!(
+                requested,
+                assigned,
+                "the server did not join the requested mode; playing deathmatch. \
+                 Check `php artisan game:mode:owner` / /api/v1/modes that the mode is live"
+            );
+            self.notifications
+                .push(format!("Mode '{requested}' not available – deathmatch"));
+            self.state.last_error = Some(format!(
+                "Mode '{requested}' not available – server put you in '{assigned}' (deathmatch)"
+            ));
+        }
+    }
+
+    /// Asks the server once per session for the Lua package of the match.
+    fn pull_mode_package(&mut self) {
+        if self.mode_pulled || !self.net.is_connected() {
+            return;
+        }
+
+        if self.state.mode.is_none() && self.configured_mode.is_none() {
+            // Built-in Deathmatch: there is no package to download.
+            return;
+        }
+
+        self.mode_pulled = true;
+        self.net
+            .send_message(crate::protocol::message::ProtocolMessage::Pull(
+                crate::protocol::message::Pull::mode(),
+            ));
     }
 
     fn report_connect(&mut self, result: anyhow::Result<()>) {
@@ -226,8 +306,12 @@ impl ClientApp {
     /// Order is deliberate: authoritative data first, then input/prediction,
     /// then presentation.
     pub fn frame(&mut self, frame_time: Duration, input: InputSample) {
-        // 1. Apply everything the server told us since the last frame.
+        // 1. Apply everything the server told us since the last frame, then
+        //    ask for the mode package once the handshake is done.
         let network = self.net.update(&mut self.state);
+        self.check_requested_mode();
+        self.pull_mode_package();
+        self.write_discovered_modes();
         self.notifications.extend(network.notifications);
         self.sync_tick_offset();
         if let Some(local) = self.state.local_player.clone() {
@@ -598,6 +682,7 @@ impl ClientApp {
         while Instant::now() < deadline {
             self.net.update(&mut self.state);
             if self.net.is_connected() {
+                self.pull_mode_package();
                 return;
             }
             std::thread::sleep(Duration::from_millis(2));

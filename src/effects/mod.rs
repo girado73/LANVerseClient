@@ -135,7 +135,10 @@ impl Effects {
                 }
                 tracing::debug!(%player_id, %item_id, "item pickup");
             }
-            GameEvent::ScoreChanged { .. } | GameEvent::Unknown => {}
+            GameEvent::ScoreChanged { .. }
+            | GameEvent::ModeLog { .. }
+            | GameEvent::ModeError { .. }
+            | GameEvent::Unknown => {}
         }
     }
 

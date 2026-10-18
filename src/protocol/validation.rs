@@ -41,12 +41,20 @@ pub enum ValidationError {
     InvalidWorld(f32, f32),
     #[error("movement speed {0} is implausible")]
     InvalidMoveSpeed(f32),
+    #[error("snapshot contains too many markers ({0})")]
+    TooManyMarkers(usize),
+    #[error("marker {0} is implausible: {1}")]
+    InvalidMarker(u64, String),
 }
 
 /// Upper bound for a plausible world dimension (world units / pixels).
 const MAX_WORLD_DIMENSION: f32 = 1_000_000.0;
 /// Upper bound for a plausible player speed in world units per second.
 const MAX_MOVE_SPEED: f32 = 10_000.0;
+/// Upper bound for script markers in one snapshot (server caps at 256).
+const MAX_MARKERS: usize = 512;
+/// Longest marker label the client draws (server truncates to 24).
+const MAX_MARKER_LABEL_CHARS: usize = 32;
 
 impl Validate for InputMessage {
     fn validate(&self) -> Result<(), ValidationError> {
@@ -149,6 +157,49 @@ impl Validate for Snapshot {
             }
         }
 
+        if self.markers.len() > MAX_MARKERS {
+            return Err(ValidationError::TooManyMarkers(self.markers.len()));
+        }
+        for marker in &self.markers {
+            marker.validate()?;
+        }
+        let mut marker_ids = std::collections::HashSet::with_capacity(self.markers.len());
+        for marker in &self.markers {
+            if !marker_ids.insert(marker.id) {
+                return Err(ValidationError::InvalidMarker(
+                    marker.id,
+                    "duplicate id".to_owned(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Validate for crate::models::world::MarkerState {
+    fn validate(&self) -> Result<(), ValidationError> {
+        if !self.x.is_finite() || !self.y.is_finite() {
+            return Err(ValidationError::InvalidMarker(
+                self.id,
+                "non-finite position".to_owned(),
+            ));
+        }
+        const MAX_ABS_COORD: f32 = 1_000_000.0;
+        if self.x.abs() > MAX_ABS_COORD || self.y.abs() > MAX_ABS_COORD {
+            return Err(ValidationError::InvalidMarker(
+                self.id,
+                "position out of bounds".to_owned(),
+            ));
+        }
+        if self.label.chars().count() > MAX_MARKER_LABEL_CHARS
+            || self.kind.chars().count() > MAX_MARKER_LABEL_CHARS
+        {
+            return Err(ValidationError::InvalidMarker(
+                self.id,
+                "kind too long".to_owned(),
+            ));
+        }
         Ok(())
     }
 }
@@ -212,6 +263,7 @@ mod tests {
             message: None,
             world: None,
             move_speed: None,
+            mode: None,
         }
     }
 

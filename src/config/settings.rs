@@ -13,6 +13,8 @@ pub struct ClientConfig {
     /// Optional bearer token handed to Laravel on the handshake (e.g. Laravel
     /// Sanctum token). The server decides what to do with it.
     pub auth_token: Option<String>,
+    /// Uploaded Lua mode to join (`hello.match_id`), `None` = auto matchmaking.
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +31,9 @@ pub struct NetConfig {
     pub input_queue_capacity: usize,
     /// Size of the interpolation buffer; ~1 s of snapshots at 20 Hz.
     pub interpolation_buffer_size: usize,
+    /// Speed used for local *visual* prediction until the server announces its
+    /// own (`welcome.move_speed`). Lua modes can change it.
+    pub world_move_speed: Option<f32>,
 }
 
 impl NetConfig {
@@ -111,6 +116,7 @@ impl Default for ClientConfig {
             render: RenderConfig::default(),
             player_name: "Player".to_owned(),
             auth_token: None,
+            mode: None,
         }
     }
 }
@@ -122,6 +128,7 @@ impl Default for NetConfig {
             input_interval_ticks: 1,
             input_queue_capacity: Self::DEFAULT_INPUT_QUEUE_CAPACITY,
             interpolation_buffer_size: 64,
+            world_move_speed: None,
         }
     }
 }
@@ -193,6 +200,9 @@ pub struct ClientArgs {
     /// (useful in CI and on headless LAN machines).
     pub headless: bool,
     pub guest: bool,
+    /// Join a specific match instead of the auto-assigned one. Uploaded Lua
+    /// modes are matches named after the mode id (`coin_rush`).
+    pub mode: Option<String>,
 }
 
 impl ClientArgs {
@@ -209,6 +219,11 @@ impl ClientArgs {
                     parsed.player_name = Some(require_value(&mut iter, &arg)?)
                 }
                 "--token" => parsed.token = Some(require_value(&mut iter, &arg)?),
+                // `--mode deathmatch` = built-in game, anything else is a mode id.
+                "--mode" => {
+                    let value = require_value(&mut iter, &arg)?;
+                    parsed.mode = (!value.eq_ignore_ascii_case("deathmatch")).then_some(value);
+                }
                 "--headless" => parsed.headless = true,
                 "--guest" => parsed.guest = true,
                 // Handled by `main`; accepted here for validation.
@@ -247,6 +262,11 @@ impl ClientArgs {
         }
         if let Ok(token) = std::env::var("LAN_BASH_TOKEN") {
             config.auth_token = Some(token);
+        }
+        if let Ok(mode) = std::env::var("LAN_BASH_MODE")
+            && !mode.eq_ignore_ascii_case("deathmatch")
+        {
+            config.mode = Some(mode);
         }
 
         if let Some(url) = self.server_url {
@@ -353,6 +373,8 @@ OPTIONS:
     -n, --player-name <NAME>   Display name sent in the handshake
         --token <TOKEN>        Auth token forwarded to Laravel
         --guest                Connect without token under a random guest name
+        --mode <ID>            Join the uploaded Lua mode with this id
+                               (`deathmatch` = built-in game, default)
         --headless             Run without a window (network/prediction only)
         --mock-server          Use an in-memory demo server instead of Laravel
         --max-ticks <N>        Headless: stop after N simulated ticks
@@ -362,7 +384,7 @@ OPTIONS:
 ENVIRONMENT:
     LAN_BASH_SERVER       endpoint; a bare `host:port` gets `/app/<key>` appended
     LAN_BASH_REVERB_KEY   Reverb app key from the server's .env (REVERB_APP_KEY)
-    LAN_BASH_PLAYER_NAME, LAN_BASH_TOKEN
+    LAN_BASH_PLAYER_NAME, LAN_BASH_TOKEN, LAN_BASH_MODE
     RUST_LOG              tracing filter (e.g. RUST_LOG=lan_bash_client=debug)",
         default_url = ConnectionConfig::default().url
     );

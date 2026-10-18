@@ -35,6 +35,9 @@ impl SceneRenderer {
         d.clear_background(Color::new(26, 24, 34, 255));
         draw_grid(d, top_left, camera);
 
+        // --- mode markers (under the players) ---------------------------
+        draw_markers(d, state, camera);
+
         // --- players -----------------------------------------------------
         // Draw remote players first, then ourselves on top so we are never hidden.
         let local_id = state.local_player.clone();
@@ -150,6 +153,50 @@ fn draw_one(
 
 /// Small arrow-ish marker at the viewport edge for a remote player that is
 /// outside the camera. Purely informational (no gameplay effect).
+/// Draws the markers a Lua mode placed (coins, zones, goals …).
+///
+/// Colour by kind so mode authors can use `"coin"`, `"goal"` and anything else
+/// without client changes.
+fn draw_markers(d: &mut impl RaylibDraw, state: &GameState, camera: &Camera) {
+    for marker in &state.markers {
+        let world_position = Vec2::new(marker.x, marker.y);
+        if !camera.is_visible(world_position, 16.0) {
+            continue;
+        }
+        let position = camera.world_to_screen(world_position);
+
+        let color = match marker.kind.as_str() {
+            "coin" => Color::new(255, 196, 61, 255),
+            "goal" | "hill" | "zone" => Color::new(86, 204, 242, 255),
+            _ => Color::new(199, 125, 255, 255),
+        };
+        d.draw_circle(
+            position.x.round() as i32,
+            position.y.round() as i32,
+            5.0,
+            color,
+        );
+        d.draw_circle_lines(
+            position.x as i32,
+            position.y as i32,
+            5.5,
+            Color::new(20, 24, 32, 220),
+        );
+
+        let label: String = marker.label.chars().take(12).collect();
+        if !label.is_empty() {
+            let width = label.chars().count() as i32 * 4;
+            d.draw_text(
+                &label,
+                position.x as i32 - width,
+                position.y as i32 - 15,
+                8,
+                color,
+            );
+        }
+    }
+}
+
 fn draw_offscreen_marker(
     d: &mut impl RaylibDraw,
     screen: Vec2,

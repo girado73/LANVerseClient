@@ -14,9 +14,9 @@ use std::collections::HashMap;
 
 use crate::core::{MatchId, PlayerId, Tick, Vec2};
 use crate::models::visual::VisualState;
-use crate::models::world::{PlayerState, RoundInfo};
+use crate::models::world::{MarkerState, PlayerState, RoundInfo};
 use crate::net::connection::ConnectionStatus;
-use crate::protocol::message::{Phase, Welcome};
+use crate::protocol::message::{ModeSummary, Phase, Welcome};
 
 /// Playfield extents in world units.
 ///
@@ -99,7 +99,28 @@ pub struct GameState {
     pub buffer_overflows: u64,
     /// Last error from the server or transport, for the HUD.
     pub last_error: Option<String>,
+    /// Markers placed by the running Lua mode (empty for the built-in game).
+    ///
+    /// Replaced wholesale by every snapshot and validated by `net::client`;
+    /// only the newest snapshot's list is ever drawn.
+    pub markers: Vec<MarkerState>,
+    /// Lua mode of the current match, as announced by the welcome.
+    pub mode: Option<ModeSummary>,
+    /// Console lines from the mode script (`mode_log` events), newest last.
+    pub mode_log: std::collections::VecDeque<ModeLogLine>,
+    /// Set when the mode script failed and the server fell back to Deathmatch.
+    pub mode_error: Option<String>,
 }
+
+/// One line of Lua console output relayed by the server.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModeLogLine {
+    pub level: String,
+    pub message: String,
+}
+
+/// How many script log lines the HUD keeps.
+pub const MODE_LOG_CAPACITY: usize = 8;
 
 impl Default for GameState {
     fn default() -> Self {
@@ -120,6 +141,10 @@ impl Default for GameState {
             acked_input_sequence: None,
             buffer_overflows: 0,
             last_error: None,
+            markers: Vec::new(),
+            mode: None,
+            mode_log: std::collections::VecDeque::new(),
+            mode_error: None,
         }
     }
 }
@@ -159,6 +184,17 @@ impl GameState {
         matches!(self.connection, ConnectionStatus::Connected)
     }
 
+    /// Keeps the newest `MODE_LOG_CAPACITY` script log lines.
+    pub fn push_mode_log(&mut self, level: impl Into<String>, message: impl Into<String>) {
+        while self.mode_log.len() >= MODE_LOG_CAPACITY {
+            self.mode_log.pop_front();
+        }
+        self.mode_log.push_back(ModeLogLine {
+            level: level.into(),
+            message: message.into(),
+        });
+    }
+
     /// Drops everything that is session-scoped when a connection is lost.
     /// Authoritative data must never survive into a new session.
     pub fn reset_session(&mut self) {
@@ -172,6 +208,10 @@ impl GameState {
         self.server_tick = Tick::ZERO;
         self.acked_input_sequence = None;
         self.buffer_overflows = 0;
+        self.markers.clear();
+        self.mode = None;
+        self.mode_log.clear();
+        self.mode_error = None;
         // `world` and `move_speed` are configuration, not session state: the
         // welcome re-sends them anyway, and keeping them avoids a frame with a
         // 0×0 map.

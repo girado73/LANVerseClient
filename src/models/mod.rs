@@ -16,4 +16,4 @@ pub mod world;
 
 pub use game_state::{GameState, WorldBounds};
 pub use visual::{AnimationClock, PlayerVisuals, VisualState};
-pub use world::{PlayerState, RoundInfo};
+pub use world::{MarkerState, PlayerState, RoundInfo};

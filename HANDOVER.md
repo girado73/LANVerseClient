@@ -1,3 +1,77 @@
+# Client-Handover – Lua-Modi (Stand 2026-10-18)
+
+Ergänzung zum bestehenden Handover: Der Client kann jetzt mit Hochgeladenen
+Lua-Modi spielen. Alles hier ist gegen `game:serve` + `publish` verifiziert.
+
+## Was neu ist
+
+| Baustein | Datei |
+|---|---|
+| `--mode <id>` / `LAN_BASH_MODE`: Match eines Modus beitreten | `src/config/settings.rs`, `src/app/loop_runner.rs` |
+| `Welcome.mode`, `Snapshot.markers`, `Pull`/`Mode`-Frames, `mode_log`/`mode_error` | `src/protocol/message.rs` |
+| Validierung von Marker-Liste (Duplikate, NaN, Größe) | `src/protocol/validation.rs` |
+| Marker + MiniMap-Punkte + `MODE`-Titel/Konsole | `src/render/scene.rs`, `src/render/hud.rs` |
+| Paket-Download + Ablage in `./modes/<id>/` | `src/mode_cache.rs`, `src/net/client.rs` |
+| Server-Geschwindigkeit für lokale Vorhersage | `src/config/settings.rs` (`NetConfig::world_move_speed`), `src/simulation/prediction.rs` (`MovementModel::with_speed`) |
+
+Ablauf:
+
+1. `hello.match_id = <mode>` (nur wenn `--mode` gesetzt ist).
+2. `welcome.mode` ⇒ HUD zeigt Modusnamen.
+3. Einmal pro Sitzung `{"type":"pull","what":"mode"}`; die Antwort wird unter
+   `$LAN_BASH_MODES_DIR/<id>/` gespeichert. Existiert dort schon eine andere
+   Version, wird sie **nicht** überschrieben, die Server-Kopie landet in
+   `<id>_server/`. `mode.json` und `script.lua` werden geschrieben; gespielt
+   wird ohne das Skript.
+4. `snapshot.markers` wird bei jedem Snapshot komplett ersetzt; ein ungültiger
+   Marker verwirft den ganzen Snapshot (wie bei Spielern).
+5. `mode_log` füllt die HUD-Konsole (8 Zeilen), `mode_error` zeigt „MODE ERROR“.
+   Der Client führt **kein** Lua aus — die Snapshots enthalten alles Nötige.
+
+## Benutzung
+
+```sh
+cargo run -- --mode coin_rush --player-name Alice
+cargo run -- --mode deathmatch              # = automatisches Matchmaking
+LAN_BASH_MODE=coin_rush cargo run --headless --max-ticks 600
+```
+
+Ohne `--mode` ändert sich nichts am bisherigen Verhalten.
+
+## Was du wissen musst
+
+- Marker-IDs kommen vom Server und sind pro Match eindeutig; der Client
+  validiert Duplikate, weil ein Skript die Marker-Tabelle manipulieren kann.
+- Der Marker-Download läuft einmal pro Sitzung. Ein `reconnect()` setzt das
+  Flag zurück, ein neuer Modus im selben Prozess löst einen neuen Pull aus.
+- `--mode` schickt nur den Match-Namen. Läuft der Modus nicht (kein Upload,
+  Draft, falscher Name), antwortet der Server mit Deathmatch — kein Fehler.
+- Sichtbarkeit: die Kamera zeigt ~2 % der 3200×1800-Welt; Marker außerhalb
+  sind nur als MiniMap-Punkt zu sehen.
+
+## Gates (grün)
+
+```bash
+cargo fmt -- --check
+cargo clippy --all-targets      # 0 Warnungen
+cargo test                      # 112 Unit + 7 + 3 + 1 + 2 Integration
+```
+
+Neu: `protocol::message`-Tests für Mode-Welcome/Marker/Pull, `net::client`-Tests
+für gelöschte Marker und Fehler-Events, `mode_cache`-Tests für Pfad-Sicherheit
+und Nicht-Überschreiben.
+
+## Offene Punkte
+
+- [ ] Kein Modus-Auswahlmenü im GUI (nur Kommandozeile).
+- [ ] Marker sind Kreise + Label; kein Sprite/Animation je `kind`.
+- [ ] `welcome.move_speed` bleibt ungenutzt — lokale Vorhersage nimmt weiter
+      den Default (220 u/s) bzw. `NetConfig::world_move_speed`.
+- [ ] Headless-Runden laufen in Echtzeit (~16 ms/Tick); Tests mit kurzen
+      Budgets enden oft noch im Countdown.
+
+---
+
 # LAN Bash Client — Handover / Working Notes
 
 > **Status: working against the real server.** Everything below was verified on
